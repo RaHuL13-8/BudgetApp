@@ -348,7 +348,7 @@ button:hover {
 
 .amount-date-row {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 0.6rem;
 }
 
@@ -878,6 +878,11 @@ button:hover {
     font-size: 0.78rem;
   }
 
+  .amount-date-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+  }
+
   .chart-box {
     min-height: 220px;
   }
@@ -1022,10 +1027,6 @@ button:hover {
   .expense-form,
   .category-form {
     gap: 0.48rem;
-  }
-
-  .amount-date-row {
-    gap: 0.5rem;
   }
 
   .expense-form label {
