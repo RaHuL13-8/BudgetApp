@@ -37,8 +37,10 @@ const currency = new Intl.NumberFormat('en-US', {
 
 const USER_STORAGE_KEY = 'budget-user-id';
 const DEFAULT_USERNAME = 'demo_user_1';
+const FRIEND_SERIES_COLORS = ['#22C55E', '#38BDF8', '#F59E0B', '#A78BFA', '#FB7185', '#14B8A6', '#F97316'];
 
 type MobileTab = 'add' | 'trends' | 'recent' | 'friends';
+type FriendPreset = 'all' | 'month' | 'quarter' | 'ytd' | 'custom';
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
@@ -67,6 +69,23 @@ function rangeWindowStart(range: 'daily' | 'monthly' | 'yearly', endDate: Date):
   }
 
   return new Date(endDate.getFullYear(), endDate.getMonth() - 11, 1);
+}
+
+function summarizeTopCategory(expenses: Expense[]): { name: string; amount: number } | null {
+  const totals = new Map<string, number>();
+
+  for (const expense of expenses) {
+    totals.set(expense.categoryName, (totals.get(expense.categoryName) ?? 0) + expense.amount);
+  }
+
+  let top: { name: string; amount: number } | null = null;
+  for (const [name, amount] of totals.entries()) {
+    if (!top || amount > top.amount) {
+      top = { name, amount };
+    }
+  }
+
+  return top;
 }
 
 function filterExpensesByPresetRange(expenses: Expense[], range: 'daily' | 'monthly' | 'yearly'): Expense[] {
@@ -193,6 +212,7 @@ export default function App() {
   const [isTrendFilterModalOpen, setIsTrendFilterModalOpen] = useState(false);
   const [isRecentFilterModalOpen, setIsRecentFilterModalOpen] = useState(false);
   const [isQuickSelectModalOpen, setIsQuickSelectModalOpen] = useState(false);
+  const [isFriendFilterModalOpen, setIsFriendFilterModalOpen] = useState(false);
 
   const [quickCategoryIds, setQuickCategoryIds] = useState<string[]>([]);
   const [draftQuickCategoryIds, setDraftQuickCategoryIds] = useState<string[]>([]);
@@ -215,6 +235,12 @@ export default function App() {
 
   const [friendSearchTerm, setFriendSearchTerm] = useState('');
   const [friendSearchResults, setFriendSearchResults] = useState<UserSearchResult[]>([]);
+  const [friendFilterPreset, setFriendFilterPreset] = useState<FriendPreset>('all');
+  const [friendFilterYear, setFriendFilterYear] = useState('all');
+  const [friendFilterMonth, setFriendFilterMonth] = useState('all');
+  const [friendFilterStartDate, setFriendFilterStartDate] = useState('');
+  const [friendFilterEndDate, setFriendFilterEndDate] = useState('');
+  const [includeMeInFriendComparison, setIncludeMeInFriendComparison] = useState(true);
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -277,9 +303,16 @@ export default function App() {
     setTrendCategoryId('all');
     setFriendSearchTerm('');
     setFriendSearchResults([]);
+    setFriendFilterPreset('all');
+    setFriendFilterYear('all');
+    setFriendFilterMonth('all');
+    setFriendFilterStartDate('');
+    setFriendFilterEndDate('');
+    setIncludeMeInFriendComparison(true);
     setIsTrendFilterModalOpen(false);
     setIsRecentFilterModalOpen(false);
     setIsQuickSelectModalOpen(false);
+    setIsFriendFilterModalOpen(false);
 
     try {
       const rawQuickCategories = localStorage.getItem(`budget-quick-categories-${userId}`);
@@ -401,19 +434,175 @@ export default function App() {
     return new Set(insight?.user.friends ?? []);
   }, [friendInsights]);
 
-  const friendComparisonData = useMemo(
-    () =>
-      friendInsights.map((item) => ({
-        name: item.isCurrentUser ? `${item.user.username} (You)` : item.user.username,
-        amount: Number(item.totalSpend.toFixed(2))
-      })),
+  const friendOnlyInsights = useMemo(() => friendInsights.filter((item) => !item.isCurrentUser), [friendInsights]);
+
+  const friendAllExpenses = useMemo(
+    () => friendInsights.flatMap((item) => item.expenses),
     [friendInsights]
   );
 
-  const friendOnlyInsights = useMemo(
-    () => friendInsights.filter((item) => !item.isCurrentUser),
-    [friendInsights]
+  const friendExpenseYears = useMemo(() => {
+    const years = new Set(friendAllExpenses.map((expense) => expense.date.slice(0, 4)));
+    return Array.from(years).sort((a, b) => b.localeCompare(a));
+  }, [friendAllExpenses]);
+
+  const friendExpenseMonths = useMemo(() => {
+    const months = new Set(
+      friendAllExpenses
+        .filter((expense) => friendFilterYear === 'all' || expense.date.startsWith(friendFilterYear))
+        .map((expense) => expense.date.slice(5, 7))
+    );
+    return Array.from(months).sort((a, b) => a.localeCompare(b));
+  }, [friendAllExpenses, friendFilterYear]);
+
+  const isFriendRangeInvalid = Boolean(
+    friendFilterStartDate && friendFilterEndDate && friendFilterStartDate > friendFilterEndDate
   );
+
+  const filteredFriendInsights = useMemo(() => {
+    if (isFriendRangeInvalid) {
+      return [];
+    }
+
+    return friendInsights.map((item) => {
+      const filteredExpenses = item.expenses.filter((expense) => {
+        const year = expense.date.slice(0, 4);
+        const month = expense.date.slice(5, 7);
+        const yearMatch = friendFilterYear === 'all' || year === friendFilterYear;
+        const monthMatch = friendFilterMonth === 'all' || month === friendFilterMonth;
+        const startMatch = !friendFilterStartDate || expense.date >= friendFilterStartDate;
+        const endMatch = !friendFilterEndDate || expense.date <= friendFilterEndDate;
+        return yearMatch && monthMatch && startMatch && endMatch;
+      });
+
+      return {
+        ...item,
+        expenses: filteredExpenses,
+        totalSpend: filteredExpenses.reduce((sum, expense) => sum + expense.amount, 0),
+        topCategory: summarizeTopCategory(filteredExpenses),
+        recentExpenses: filteredExpenses.slice(0, 4)
+      };
+    });
+  }, [
+    friendInsights,
+    friendFilterYear,
+    friendFilterMonth,
+    friendFilterStartDate,
+    friendFilterEndDate,
+    isFriendRangeInvalid
+  ]);
+
+  const friendInsightsForComparison = useMemo(
+    () => filteredFriendInsights.filter((item) => includeMeInFriendComparison || !item.isCurrentUser),
+    [filteredFriendInsights, includeMeInFriendComparison]
+  );
+
+  const friendComparisonData = useMemo(
+    () =>
+      friendInsightsForComparison.map((item) => ({
+        name: item.isCurrentUser ? `${item.user.username} (You)` : item.user.username,
+        amount: Number(item.totalSpend.toFixed(2))
+      })),
+    [friendInsightsForComparison]
+  );
+
+  const friendSeries = useMemo(
+    () =>
+      friendInsightsForComparison.map((item, index) => ({
+        key: item.user.id,
+        label: item.isCurrentUser ? `${item.user.username} (You)` : item.user.username,
+        color: FRIEND_SERIES_COLORS[index % FRIEND_SERIES_COLORS.length]
+      })),
+    [friendInsightsForComparison]
+  );
+
+  const friendCategoryComparisonData = useMemo(() => {
+    if (friendInsightsForComparison.length <= 1) {
+      return [];
+    }
+
+    const categoryTotals = new Map<string, number>();
+    const byUser = new Map<string, Map<string, number>>();
+
+    for (const item of friendInsightsForComparison) {
+      const userMap = new Map<string, number>();
+      for (const expense of item.expenses) {
+        userMap.set(expense.categoryName, (userMap.get(expense.categoryName) ?? 0) + expense.amount);
+      }
+      byUser.set(item.user.id, userMap);
+      for (const [category, amount] of userMap.entries()) {
+        categoryTotals.set(category, (categoryTotals.get(category) ?? 0) + amount);
+      }
+    }
+
+    const topCategories = Array.from(categoryTotals.entries())
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 6)
+      .map(([category]) => category);
+
+    return topCategories.map((category) => {
+      const row: Record<string, string | number> = { category };
+      for (const series of friendSeries) {
+        row[series.key] = Number((byUser.get(series.key)?.get(category) ?? 0).toFixed(2));
+      }
+      return row;
+    });
+  }, [friendInsightsForComparison, friendSeries]);
+
+  const filteredFriendOnlyInsights = useMemo(
+    () => filteredFriendInsights.filter((item) => !item.isCurrentUser),
+    [filteredFriendInsights]
+  );
+
+  const friendHighlights = useMemo(() => {
+    if (friendInsightsForComparison.length === 0) {
+      return null;
+    }
+
+    const highestSpender = [...friendInsightsForComparison].sort((a, b) => b.totalSpend - a.totalSpend)[0];
+    const mostActive = [...friendInsightsForComparison].sort((a, b) => b.expenses.length - a.expenses.length)[0];
+    const topCategoryTotals = new Map<string, number>();
+
+    for (const item of friendInsightsForComparison) {
+      for (const expense of item.expenses) {
+        topCategoryTotals.set(
+          expense.categoryName,
+          (topCategoryTotals.get(expense.categoryName) ?? 0) + expense.amount
+        );
+      }
+    }
+
+    const topCategoryEntry = Array.from(topCategoryTotals.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+
+    return {
+      highestSpender,
+      mostActive,
+      topCategoryEntry
+    };
+  }, [friendInsightsForComparison]);
+
+  const friendFilterSummary = useMemo(() => {
+    const segments: string[] = [];
+    segments.push(friendFilterPreset === 'custom' ? 'Custom range' : friendFilterPreset.toUpperCase());
+    if (friendFilterYear !== 'all') {
+      segments.push(friendFilterYear);
+    }
+    if (friendFilterMonth !== 'all') {
+      segments.push(monthName(friendFilterMonth));
+    }
+    if (friendFilterStartDate || friendFilterEndDate) {
+      segments.push(`${friendFilterStartDate || '...'} to ${friendFilterEndDate || '...'}`);
+    }
+    segments.push(includeMeInFriendComparison ? 'Including me' : 'Friends only');
+    return segments.join(' • ');
+  }, [
+    friendFilterPreset,
+    friendFilterYear,
+    friendFilterMonth,
+    friendFilterStartDate,
+    friendFilterEndDate,
+    includeMeInFriendComparison
+  ]);
 
   useEffect(() => {
     if (selectedExpenseYear !== 'all' && !expenseYears.includes(selectedExpenseYear)) {
@@ -426,6 +615,18 @@ export default function App() {
       setSelectedExpenseMonth('all');
     }
   }, [expenseMonths, selectedExpenseMonth]);
+
+  useEffect(() => {
+    if (friendFilterYear !== 'all' && !friendExpenseYears.includes(friendFilterYear)) {
+      setFriendFilterYear('all');
+    }
+  }, [friendExpenseYears, friendFilterYear]);
+
+  useEffect(() => {
+    if (friendFilterMonth !== 'all' && !friendExpenseMonths.includes(friendFilterMonth)) {
+      setFriendFilterMonth('all');
+    }
+  }, [friendExpenseMonths, friendFilterMonth]);
 
   useEffect(() => {
     if (trendCategoryId !== 'all' && !categories.some((category) => category.id === trendCategoryId)) {
@@ -456,7 +657,11 @@ export default function App() {
 
   useEffect(() => {
     const anyModalOpen =
-      isUserModalOpen || isTrendFilterModalOpen || isRecentFilterModalOpen || isQuickSelectModalOpen;
+      isUserModalOpen ||
+      isTrendFilterModalOpen ||
+      isRecentFilterModalOpen ||
+      isQuickSelectModalOpen ||
+      isFriendFilterModalOpen;
 
     if (!anyModalOpen) {
       return undefined;
@@ -468,12 +673,19 @@ export default function App() {
         setIsTrendFilterModalOpen(false);
         setIsRecentFilterModalOpen(false);
         setIsQuickSelectModalOpen(false);
+        setIsFriendFilterModalOpen(false);
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isUserModalOpen, isTrendFilterModalOpen, isRecentFilterModalOpen, isQuickSelectModalOpen]);
+  }, [
+    isUserModalOpen,
+    isTrendFilterModalOpen,
+    isRecentFilterModalOpen,
+    isQuickSelectModalOpen,
+    isFriendFilterModalOpen
+  ]);
 
   function openQuickSelectModal() {
     setDraftQuickCategoryIds(
@@ -666,6 +878,32 @@ export default function App() {
     }
   }
 
+  function applyFriendPreset(preset: FriendPreset) {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    setFriendFilterPreset(preset);
+
+    if (preset === 'all') {
+      setFriendFilterYear('all');
+      setFriendFilterMonth('all');
+      setFriendFilterStartDate('');
+      setFriendFilterEndDate('');
+      return;
+    }
+
+    let start: Date;
+    if (preset === 'month') {
+      start = new Date(now.getFullYear(), now.getMonth(), 1);
+    } else if (preset === 'quarter') {
+      start = new Date(now.getFullYear(), now.getMonth() - 2, 1);
+    } else {
+      start = new Date(now.getFullYear(), 0, 1);
+    }
+
+    setFriendFilterStartDate(start.toISOString().slice(0, 10));
+    setFriendFilterEndDate(today);
+  }
+
   return (
     <main className="page-shell">
       <div className="bg-orb bg-orb-top" />
@@ -694,7 +932,7 @@ export default function App() {
 
       {isUserModalOpen ? (
         <div className="modal-backdrop" onClick={() => setIsUserModalOpen(false)}>
-          <div className="modal-card glass" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-card glass profile-modal-card" onClick={(event) => event.stopPropagation()}>
             <h3>Profile</h3>
             <p>Current username: @{userName}</p>
 
@@ -723,6 +961,69 @@ export default function App() {
                 {managingProfile ? 'Creating...' : 'Create User'}
               </button>
             </form>
+
+            <section className="profile-friends-block">
+              <div className="profile-friends-head">
+                <h4>Manage Friends</h4>
+                <p>Search and add, or remove existing friends.</p>
+              </div>
+              <form className="profile-friend-search" onSubmit={onSearchFriends}>
+                <input
+                  value={friendSearchTerm}
+                  onChange={(event) => setFriendSearchTerm(event.target.value)}
+                  placeholder="Search username to add friend"
+                />
+                <button type="submit" className="secondary" disabled={searchingFriends}>
+                  {searchingFriends ? 'Searching...' : 'Search'}
+                </button>
+              </form>
+
+              {friendSearchResults.length > 0 ? (
+                <ul className="friend-search-results profile-search-results">
+                  {friendSearchResults.map((item) => {
+                    const alreadyAdded = friendIdSet.has(item.id);
+
+                    return (
+                      <li key={item.id}>
+                        <span>@{item.username}</span>
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={alreadyAdded || addingFriendUsername === item.username}
+                          onClick={() => onAddFriend(item.username)}
+                        >
+                          {alreadyAdded
+                            ? 'Added'
+                            : addingFriendUsername === item.username
+                              ? 'Adding...'
+                              : 'Add'}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+
+              {friendOnlyInsights.length > 0 ? (
+                <div className="friend-chip-row profile-friend-chip-row">
+                  {friendOnlyInsights.map((item) => (
+                    <div key={item.user.id} className="friend-chip">
+                      <span>@{item.user.username}</span>
+                      <button
+                        type="button"
+                        className="danger-btn"
+                        onClick={() => onRemoveFriend(item.user.id)}
+                        disabled={removingFriendId === item.user.id}
+                      >
+                        {removingFriendId === item.user.id ? '...' : 'Remove'}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No friends added yet.</p>
+              )}
+            </section>
 
             <div className="modal-actions">
               <button type="button" className="secondary" onClick={() => setIsUserModalOpen(false)}>
@@ -859,6 +1160,134 @@ export default function App() {
                 Reset
               </button>
               <button type="button" className="primary" onClick={() => setIsRecentFilterModalOpen(false)}>
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isFriendFilterModalOpen ? (
+        <div className="modal-backdrop" onClick={() => setIsFriendFilterModalOpen(false)}>
+          <div className="modal-card glass filter-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>Friend Comparison Filters</h3>
+            <div className="friend-preset-row">
+              <button
+                type="button"
+                className={friendFilterPreset === 'all' ? 'range-btn active' : 'range-btn'}
+                onClick={() => applyFriendPreset('all')}
+              >
+                All Time
+              </button>
+              <button
+                type="button"
+                className={friendFilterPreset === 'month' ? 'range-btn active' : 'range-btn'}
+                onClick={() => applyFriendPreset('month')}
+              >
+                This Month
+              </button>
+              <button
+                type="button"
+                className={friendFilterPreset === 'quarter' ? 'range-btn active' : 'range-btn'}
+                onClick={() => applyFriendPreset('quarter')}
+              >
+                Last 3 Months
+              </button>
+              <button
+                type="button"
+                className={friendFilterPreset === 'ytd' ? 'range-btn active' : 'range-btn'}
+                onClick={() => applyFriendPreset('ytd')}
+              >
+                YTD
+              </button>
+            </div>
+            <div className="modal-filter-grid friend-filter-grid">
+              <label htmlFor="friendYearFilter">Year</label>
+              <select
+                id="friendYearFilter"
+                value={friendFilterYear}
+                onChange={(event) => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterYear(event.target.value);
+                }}
+              >
+                <option value="all">All years</option>
+                {friendExpenseYears.map((year) => (
+                  <option key={year} value={year}>
+                    {year}
+                  </option>
+                ))}
+              </select>
+
+              <label htmlFor="friendMonthFilter">Month</label>
+              <select
+                id="friendMonthFilter"
+                value={friendFilterMonth}
+                onChange={(event) => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterMonth(event.target.value);
+                }}
+              >
+                <option value="all">All months</option>
+                {friendExpenseMonths.map((month) => (
+                  <option key={month} value={month}>
+                    {monthName(month)}
+                  </option>
+                ))}
+              </select>
+
+              <label htmlFor="friendStartDate">Start Date</label>
+              <input
+                id="friendStartDate"
+                type="date"
+                value={friendFilterStartDate}
+                onChange={(event) => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterStartDate(event.target.value);
+                }}
+              />
+
+              <label htmlFor="friendEndDate">End Date</label>
+              <input
+                id="friendEndDate"
+                type="date"
+                value={friendFilterEndDate}
+                onChange={(event) => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterEndDate(event.target.value);
+                }}
+              />
+            </div>
+
+            <label className="friend-include-toggle">
+              <input
+                type="checkbox"
+                checked={includeMeInFriendComparison}
+                onChange={(event) => setIncludeMeInFriendComparison(event.target.checked)}
+              />
+              Include my profile in comparisons
+            </label>
+
+            {isFriendRangeInvalid ? (
+              <p className="muted">Start date must be on or before end date.</p>
+            ) : null}
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => {
+                  setFriendFilterPreset('all');
+                  setFriendFilterYear('all');
+                  setFriendFilterMonth('all');
+                  setFriendFilterStartDate('');
+                  setFriendFilterEndDate('');
+                  setIncludeMeInFriendComparison(true);
+                }}
+              >
+                Reset
+              </button>
+              <button type="button" className="primary" onClick={() => setIsFriendFilterModalOpen(false)}>
                 Apply
               </button>
             </div>
@@ -1276,72 +1705,61 @@ export default function App() {
           <div className="panel-head friends-head">
             <div>
               <h3>Friends Comparison</h3>
-              <span>Compare spending and category behavior.</span>
+              <span>Compare spend, categories, and patterns with filters.</span>
             </div>
+            <button
+              type="button"
+              className="secondary filter-trigger-btn"
+              onClick={() => setIsFriendFilterModalOpen(true)}
+            >
+              Filters
+            </button>
           </div>
 
-          <form className="friend-search-form" onSubmit={onSearchFriends}>
-            <input
-              value={friendSearchTerm}
-              onChange={(event) => setFriendSearchTerm(event.target.value)}
-              placeholder="Search username to add friend"
-            />
-            <button type="submit" className="secondary" disabled={searchingFriends}>
-              {searchingFriends ? 'Searching...' : 'Search'}
-            </button>
-          </form>
-
-          {friendSearchResults.length > 0 ? (
-            <ul className="friend-search-results">
-              {friendSearchResults.map((item) => {
-                const alreadyAdded = friendIdSet.has(item.id);
-
-                return (
-                  <li key={item.id}>
-                    <span>@{item.username}</span>
-                    <button
-                      type="button"
-                      className="primary"
-                      disabled={alreadyAdded || addingFriendUsername === item.username}
-                      onClick={() => onAddFriend(item.username)}
-                    >
-                      {alreadyAdded
-                        ? 'Added'
-                        : addingFriendUsername === item.username
-                          ? 'Adding...'
-                          : 'Add'}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
+          <p className="muted friend-filter-summary">{friendFilterSummary}</p>
+          {friendOnlyInsights.length === 0 ? (
+            <p className="muted">Add friends from Profile to unlock comparison insights.</p>
           ) : null}
 
-          {friendOnlyInsights.length > 0 ? (
-            <div className="friend-chip-row">
-              {friendOnlyInsights.map((item) => (
-                <div key={item.user.id} className="friend-chip">
-                  <span>@{item.user.username}</span>
-                  <button
-                    type="button"
-                    className="danger-btn"
-                    onClick={() => onRemoveFriend(item.user.id)}
-                    disabled={removingFriendId === item.user.id}
-                  >
-                    {removingFriendId === item.user.id ? '...' : 'Remove'}
-                  </button>
-                </div>
-              ))}
+          {friendHighlights ? (
+            <div className="friend-highlight-grid">
+              <article className="friend-highlight-card">
+                <p>Highest Spender</p>
+                <h5>
+                  {friendHighlights.highestSpender.isCurrentUser
+                    ? `${friendHighlights.highestSpender.user.username} (You)`
+                    : friendHighlights.highestSpender.user.username}
+                </h5>
+                <strong>{currency.format(friendHighlights.highestSpender.totalSpend)}</strong>
+              </article>
+              <article className="friend-highlight-card">
+                <p>Most Active</p>
+                <h5>
+                  {friendHighlights.mostActive.isCurrentUser
+                    ? `${friendHighlights.mostActive.user.username} (You)`
+                    : friendHighlights.mostActive.user.username}
+                </h5>
+                <strong>{friendHighlights.mostActive.expenses.length} expenses</strong>
+              </article>
+              <article className="friend-highlight-card">
+                <p>Top Shared Category</p>
+                <h5>{friendHighlights.topCategoryEntry?.[0] ?? 'No category yet'}</h5>
+                <strong>
+                  {friendHighlights.topCategoryEntry
+                    ? currency.format(friendHighlights.topCategoryEntry[1])
+                    : '$0.00'}
+                </strong>
+              </article>
             </div>
-          ) : (
-            <p className="muted">Add friends to compare spending patterns.</p>
-          )}
+          ) : null}
 
           <div className="friend-section">
-            <h4>Spend Comparison</h4>
+            <h4>Overall Spend Comparison</h4>
             <div className="chart-box friend-chart-box">
-              {friendComparisonData.length <= 1 ? (
-                <p className="muted">Add at least one friend to see comparison charts.</p>
+              {isFriendRangeInvalid ? (
+                <p className="muted">Fix the date range to view comparison charts.</p>
+              ) : friendComparisonData.length <= 1 ? (
+                <p className="muted">Add at least one friend (or include yourself) to compare overall spend.</p>
               ) : (
                 <ResponsiveContainer width="100%" height={240}>
                   <BarChart data={friendComparisonData}>
@@ -1357,28 +1775,57 @@ export default function App() {
           </div>
 
           <div className="friend-section">
+            <h4>Category-Wise Spend Comparison</h4>
+            <div className="chart-box friend-chart-box">
+              {isFriendRangeInvalid ? (
+                <p className="muted">Fix the date range to view category-wise comparison.</p>
+              ) : friendCategoryComparisonData.length === 0 ? (
+                <p className="muted">Need at least two profiles with expenses in selected filters.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={friendCategoryComparisonData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
+                    <XAxis dataKey="category" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                    <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                    <Tooltip formatter={(value: number) => currency.format(value)} />
+                    {friendSeries.map((series) => (
+                      <Bar key={series.key} dataKey={series.key} name={series.label} fill={series.color} radius={[4, 4, 0, 0]} />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+
+          <div className="friend-section">
             <h4>Top Category Per Person</h4>
-            <ul className="friend-top-list">
-              {friendInsights.map((item) => (
-                <li key={item.user.id}>
-                  <p>{item.isCurrentUser ? `${item.user.username} (You)` : item.user.username}</p>
-                  <p>
-                    {item.topCategory
-                      ? `${item.topCategory.name} • ${currency.format(item.topCategory.amount)}`
-                      : 'No spending yet'}
-                  </p>
-                </li>
-              ))}
-            </ul>
+            {friendInsightsForComparison.length === 0 ? (
+              <p className="muted">No profiles available in current comparison scope.</p>
+            ) : (
+              <ul className="friend-top-list">
+                {friendInsightsForComparison.map((item) => (
+                  <li key={item.user.id}>
+                    <p>{item.isCurrentUser ? `${item.user.username} (You)` : item.user.username}</p>
+                    <p>
+                      {item.topCategory
+                        ? `${item.topCategory.name} • ${currency.format(item.topCategory.amount)}`
+                        : 'No spending yet'}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
           <div className="friend-section">
             <h4>Recent Friend Expenses</h4>
-            {friendOnlyInsights.length === 0 ? (
-              <p className="muted">No friends added yet.</p>
+            {isFriendRangeInvalid ? (
+              <p className="muted">Fix the date range to view friend recents.</p>
+            ) : filteredFriendOnlyInsights.length === 0 ? (
+              <p className="muted">No friend expenses found for selected filters.</p>
             ) : (
               <div className="friend-recents-grid">
-                {friendOnlyInsights.map((item) => (
+                {filteredFriendOnlyInsights.map((item) => (
                   <article key={item.user.id} className="friend-recent-card">
                     <h5>@{item.user.username}</h5>
                     {item.recentExpenses.length === 0 ? (

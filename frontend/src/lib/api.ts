@@ -468,6 +468,7 @@ export async function fetchFriendInsights(userId: string): Promise<FriendInsight
   const insights = expensesByUser.map(({ profile, expenses }) => ({
     user: profile,
     isCurrentUser: profile.id === userId,
+    expenses,
     totalSpend: expenses.reduce((sum, expense) => sum + expense.amount, 0),
     topCategory: summarizeTopCategory(expenses),
     recentExpenses: expenses.slice(0, 4)

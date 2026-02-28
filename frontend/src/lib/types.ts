@@ -45,6 +45,7 @@ export type UserSearchResult = {
 export type FriendInsight = {
   user: UserProfile;
   isCurrentUser: boolean;
+  expenses: Expense[];
   totalSpend: number;
   topCategory: {
     name: string;
