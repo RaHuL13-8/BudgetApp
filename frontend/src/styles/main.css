@@ -352,6 +352,11 @@ button:hover {
   gap: 0.6rem;
 }
 
+.amount-date-row label,
+.amount-date-row input {
+  min-width: 0;
+}
+
 .picker-label {
   margin: 0;
   color: #cbd5e1;
@@ -389,10 +394,20 @@ button:hover {
   font-size: 0.79rem;
   padding: 0.34rem 0.65rem;
   background: rgba(15, 23, 42, 0.6);
+  color: #cbd5e1;
+  border-width: 1px;
+  font-weight: 500;
+  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease, color 0.14s ease;
 }
 
 .chip.active {
-  background: rgba(14, 165, 233, 0.2);
+  color: #f8fafc;
+  font-weight: 700;
+  border-width: 2px;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22),
+    0 7px 16px rgba(2, 6, 23, 0.42);
+  transform: translateY(-1px);
 }
 
 .custom-category {
@@ -529,6 +544,12 @@ button:hover {
   gap: 0.6rem;
 }
 
+.recent-list-scroll {
+  max-height: min(56vh, 560px);
+  overflow-y: auto;
+  padding-right: 0.2rem;
+}
+
 .expense-item {
   display: flex;
   justify-content: space-between;
@@ -572,18 +593,8 @@ button:hover {
   cursor: not-allowed;
 }
 
-.recent-pagination {
-  margin-top: 0.6rem;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.45rem;
-}
-
-.recent-pagination p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.8rem;
+.recent-limit-note {
+  margin-top: 0.5rem;
 }
 
 .friends-head {
@@ -690,11 +701,33 @@ button:hover {
   gap: 0.45rem;
 }
 
+.friend-combined-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.friend-combined-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.friend-combined-summary h5 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
 .friend-highlight-grid {
   display: grid;
   gap: 0.55rem;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   margin-bottom: 0.7rem;
+}
+
+.friend-advanced-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .friend-highlight-card {
@@ -719,6 +752,7 @@ button:hover {
 
 .friend-highlight-card strong {
   font-size: 0.9rem;
+  line-height: 1.3;
 }
 
 .friend-chart-box {
@@ -883,6 +917,14 @@ button:hover {
     gap: 0.5rem;
   }
 
+  .amount-date-row .amount-input {
+    font-size: 0.95rem;
+  }
+
+  .amount-date-row .amount-input::placeholder {
+    font-size: 0.78rem;
+  }
+
   .chart-box {
     min-height: 220px;
   }
@@ -937,6 +979,10 @@ button:hover {
     padding: 0.6rem 0.65rem;
   }
 
+  .recent-list-scroll {
+    max-height: min(48vh, 460px);
+  }
+
   .profile-friend-search {
     grid-template-columns: 1fr;
   }
@@ -952,6 +998,10 @@ button:hover {
   .friend-top-list li {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .friend-combined-summary h5 {
+    font-size: 0.94rem;
   }
 
   input,

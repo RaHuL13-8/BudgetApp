@@ -46,6 +46,13 @@ const MOBILE_TAB_ORDER: MobileTab[] = ['add', 'trends', 'recent', 'friends'];
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
+function toLocalISODate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function monthName(monthCode: string): string {
   const month = Number(monthCode);
   if (!month || month < 1 || month > 12) {
@@ -91,6 +98,37 @@ function rangeWindowStart(range: 'daily' | 'monthly' | 'yearly', endDate: Date):
   }
 
   return new Date(endDate.getFullYear(), endDate.getMonth() - 11, 1);
+}
+
+function getDefaultTrendDateRange(range: 'daily' | 'monthly' | 'yearly'): { start: string; end: string } {
+  const endDate = new Date();
+  const startDate = rangeWindowStart(range, endDate);
+
+  return {
+    start: toLocalISODate(startDate),
+    end: toLocalISODate(endDate)
+  };
+}
+
+function deriveDateBounds(expenses: Expense[]): { start: string; end: string } {
+  if (expenses.length === 0) {
+    const today = todayISO();
+    return { start: today, end: today };
+  }
+
+  let minDate = expenses[0].date;
+  let maxDate = expenses[0].date;
+
+  for (const expense of expenses) {
+    if (expense.date < minDate) {
+      minDate = expense.date;
+    }
+    if (expense.date > maxDate) {
+      maxDate = expense.date;
+    }
+  }
+
+  return { start: minDate, end: maxDate };
 }
 
 function summarizeTopCategory(expenses: Expense[]): { name: string; amount: number } | null {
@@ -219,6 +257,8 @@ function readErrorMessage(error: unknown, fallback: string): string {
 }
 
 export default function App() {
+  const initialTrendDateRange = getDefaultTrendDateRange('monthly');
+
   const [userId, setUserId] = useState(() => localStorage.getItem(USER_STORAGE_KEY) ?? DEFAULT_USERNAME);
   const [userName, setUserName] = useState(userId);
   const [draftSwitchUsername, setDraftSwitchUsername] = useState(userId);
@@ -235,7 +275,6 @@ export default function App() {
   const [mobileTab, setMobileTab] = useState<MobileTab>('add');
   const [mobileTrendView, setMobileTrendView] = useState<'trend' | 'split'>('trend');
   const [mobileFriendView, setMobileFriendView] = useState<'overview' | 'category' | 'recent'>('overview');
-  const [recentPage, setRecentPage] = useState(1);
 
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [isTrendFilterModalOpen, setIsTrendFilterModalOpen] = useState(false);
@@ -260,8 +299,8 @@ export default function App() {
   const [recentSubcategoryOptions, setRecentSubcategoryOptions] = useState<Subcategory[]>([]);
   const [recentStartDate, setRecentStartDate] = useState('');
   const [recentEndDate, setRecentEndDate] = useState('');
-  const [trendStartDate, setTrendStartDate] = useState('');
-  const [trendEndDate, setTrendEndDate] = useState('');
+  const [trendStartDate, setTrendStartDate] = useState(initialTrendDateRange.start);
+  const [trendEndDate, setTrendEndDate] = useState(initialTrendDateRange.end);
 
   const [friendSearchTerm, setFriendSearchTerm] = useState('');
   const [friendSearchResults, setFriendSearchResults] = useState<UserSearchResult[]>([]);
@@ -283,9 +322,13 @@ export default function App() {
   const [deletingExpenseId, setDeletingExpenseId] = useState('');
   const [error, setError] = useState('');
   const mobileTouchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const hasTabRefreshInitializedRef = useRef(false);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadData = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) {
+      setLoading(true);
+    }
     setError('');
 
     try {
@@ -320,7 +363,9 @@ export default function App() {
     } catch (requestError) {
       setError(readErrorMessage(requestError, 'Failed to load budget data from Firebase.'));
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, [userId]);
 
@@ -333,8 +378,9 @@ export default function App() {
     setSelectedExpenseSubcategory('all');
     setRecentStartDate('');
     setRecentEndDate('');
-    setTrendStartDate('');
-    setTrendEndDate('');
+    const defaultTrendRange = getDefaultTrendDateRange(range);
+    setTrendStartDate(defaultTrendRange.start);
+    setTrendEndDate(defaultTrendRange.end);
     setTrendCategoryId('all');
     setTrendSubcategory('all');
     setTrendSubcategoryOptions([]);
@@ -360,6 +406,15 @@ export default function App() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    if (!hasTabRefreshInitializedRef.current) {
+      hasTabRefreshInitializedRef.current = true;
+      return;
+    }
+
+    void loadData({ silent: true });
+  }, [mobileTab, loadData]);
 
   const rangeExpenses = useMemo(() => filterExpensesByPresetRange(expenses, range), [expenses, range]);
 
@@ -504,7 +559,7 @@ export default function App() {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [expenses]);
 
-  const filteredExpenses = useMemo(() => {
+  const recentBaseExpenses = useMemo(() => {
     return expenses.filter((expense) => {
       const year = expense.date.slice(0, 4);
       const month = expense.date.slice(5, 7);
@@ -515,29 +570,38 @@ export default function App() {
       const subcategoryMatch =
         selectedExpenseSubcategory === 'all' ||
         normalizeSubcategory(expense.subcategoryName) === selectedExpenseSubcategory;
-      const startMatch = !recentStartDate || expense.date >= recentStartDate;
-      const endMatch = !recentEndDate || expense.date <= recentEndDate;
-      return yearMatch && monthMatch && categoryMatch && subcategoryMatch && startMatch && endMatch;
+      return yearMatch && monthMatch && categoryMatch && subcategoryMatch;
     });
   }, [
     expenses,
     selectedExpenseYear,
     selectedExpenseMonth,
     selectedExpenseCategoryId,
-    selectedExpenseSubcategory,
-    recentStartDate,
-    recentEndDate
+    selectedExpenseSubcategory
   ]);
 
-  const isRecentRangeInvalid = Boolean(recentStartDate && recentEndDate && recentStartDate > recentEndDate);
-  const recentPageSize = 3;
-  const totalRecentPages = Math.max(1, Math.ceil(filteredExpenses.length / recentPageSize));
+  const recentDateBounds = useMemo(() => deriveDateBounds(recentBaseExpenses), [recentBaseExpenses]);
+  const effectiveRecentStartDate = recentStartDate || recentDateBounds.start;
+  const effectiveRecentEndDate = recentEndDate || recentDateBounds.end;
 
-  const paginatedRecentExpenses = useMemo(() => {
-    const from = (recentPage - 1) * recentPageSize;
-    const to = from + recentPageSize;
-    return filteredExpenses.slice(from, to);
-  }, [filteredExpenses, recentPage]);
+  const filteredExpenses = useMemo(() => {
+    return recentBaseExpenses.filter((expense) => {
+      return expense.date >= effectiveRecentStartDate && expense.date <= effectiveRecentEndDate;
+    });
+  }, [recentBaseExpenses, effectiveRecentStartDate, effectiveRecentEndDate]);
+
+  const isRecentRangeInvalid = Boolean(recentStartDate && recentEndDate && recentStartDate > recentEndDate);
+  const recentVisibleExpenses = useMemo(() => {
+    return [...filteredExpenses]
+      .sort((left, right) => {
+        const byDate = right.date.localeCompare(left.date);
+        if (byDate !== 0) {
+          return byDate;
+        }
+        return right.createdAt.localeCompare(left.createdAt);
+      })
+      .slice(0, 50);
+  }, [filteredExpenses]);
 
   const friendIdSet = useMemo(() => {
     const insight = friendInsights.find((item) => item.isCurrentUser);
@@ -590,6 +654,31 @@ export default function App() {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [friendAllExpenses, friendFilterCategoryName]);
 
+  const friendBaseExpenses = useMemo(() => {
+    return friendAllExpenses.filter((expense) => {
+      const year = expense.date.slice(0, 4);
+      const month = expense.date.slice(5, 7);
+      const yearMatch = friendFilterYear === 'all' || year === friendFilterYear;
+      const monthMatch = friendFilterMonth === 'all' || month === friendFilterMonth;
+      const categoryMatch =
+        friendFilterCategoryName === 'all' || expense.categoryName === friendFilterCategoryName;
+      const subcategoryMatch =
+        friendFilterSubcategory === 'all' ||
+        normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
+      return yearMatch && monthMatch && categoryMatch && subcategoryMatch;
+    });
+  }, [
+    friendAllExpenses,
+    friendFilterYear,
+    friendFilterMonth,
+    friendFilterCategoryName,
+    friendFilterSubcategory
+  ]);
+
+  const friendDateBounds = useMemo(() => deriveDateBounds(friendBaseExpenses), [friendBaseExpenses]);
+  const effectiveFriendStartDate = friendFilterStartDate || friendDateBounds.start;
+  const effectiveFriendEndDate = friendFilterEndDate || friendDateBounds.end;
+
   const isFriendRangeInvalid = Boolean(
     friendFilterStartDate && friendFilterEndDate && friendFilterStartDate > friendFilterEndDate
   );
@@ -610,8 +699,8 @@ export default function App() {
         const subcategoryMatch =
           friendFilterSubcategory === 'all' ||
           normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
-        const startMatch = !friendFilterStartDate || expense.date >= friendFilterStartDate;
-        const endMatch = !friendFilterEndDate || expense.date <= friendFilterEndDate;
+        const startMatch = expense.date >= effectiveFriendStartDate;
+        const endMatch = expense.date <= effectiveFriendEndDate;
         return yearMatch && monthMatch && categoryMatch && subcategoryMatch && startMatch && endMatch;
       });
 
@@ -629,8 +718,8 @@ export default function App() {
     friendFilterMonth,
     friendFilterCategoryName,
     friendFilterSubcategory,
-    friendFilterStartDate,
-    friendFilterEndDate,
+    effectiveFriendStartDate,
+    effectiveFriendEndDate,
     isFriendRangeInvalid
   ]);
 
@@ -691,6 +780,161 @@ export default function App() {
     });
   }, [friendInsightsForComparison, friendSeries]);
 
+  const friendCombinedExpenses = useMemo(
+    () => friendInsightsForComparison.flatMap((item) => item.expenses),
+    [friendInsightsForComparison]
+  );
+
+  const friendCombinedTotal = useMemo(
+    () => friendCombinedExpenses.reduce((sum, expense) => sum + expense.amount, 0),
+    [friendCombinedExpenses]
+  );
+
+  const friendCombinedCumulativeData = useMemo(() => {
+    if (isFriendRangeInvalid || friendCombinedExpenses.length === 0) {
+      return [] as Array<{ date: string; label: string; amount: number }>;
+    }
+
+    const dailyTotals = new Map<string, number>();
+    for (const expense of friendCombinedExpenses) {
+      dailyTotals.set(expense.date, (dailyTotals.get(expense.date) ?? 0) + expense.amount);
+    }
+
+    const orderedDates = Array.from(dailyTotals.keys()).sort((left, right) => left.localeCompare(right));
+    const dateLabelFormatter = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' });
+    let runningTotal = 0;
+
+    return orderedDates.map((date) => {
+      runningTotal += dailyTotals.get(date) ?? 0;
+      return {
+        date,
+        label: dateLabelFormatter.format(parseIsoDate(date)),
+        amount: Number(runningTotal.toFixed(2))
+      };
+    });
+  }, [friendCombinedExpenses, isFriendRangeInvalid]);
+
+  const friendCombinedCategorySplitData = useMemo(() => {
+    if (isFriendRangeInvalid || friendCombinedExpenses.length === 0) {
+      return [] as Array<{ name: string; value: number; color: string }>;
+    }
+
+    const totals = new Map<string, number>();
+    for (const expense of friendCombinedExpenses) {
+      totals.set(expense.categoryName, (totals.get(expense.categoryName) ?? 0) + expense.amount);
+    }
+
+    const colorByCategory = new Map(categories.map((category) => [category.name, category.color]));
+
+    return Array.from(totals.entries())
+      .map(([name, value]) => ({
+        name,
+        value: Number(value.toFixed(2)),
+        color: colorByCategory.get(name) ?? subcategoryColor(name)
+      }))
+      .sort((left, right) => right.value - left.value);
+  }, [friendCombinedExpenses, categories, isFriendRangeInvalid]);
+
+  const friendAdvancedInsights = useMemo(() => {
+    if (friendInsightsForComparison.length === 0) {
+      return null;
+    }
+
+    let biggestSingleExpense:
+      | { userLabel: string; amount: number; category: string; date: string }
+      | null = null;
+    let biggestDaySpend:
+      | { userLabel: string; amount: number; date: string }
+      | null = null;
+    let mostDiverse:
+      | { userLabel: string; categories: number; total: number }
+      | null = null;
+    let mostConsistent:
+      | { userLabel: string; variation: number; activeDays: number }
+      | null = null;
+    let momentumLeader:
+      | { userLabel: string; amount: number }
+      | null = null;
+
+    const momentumEnd = parseIsoDate(effectiveFriendEndDate);
+    const momentumStart = new Date(momentumEnd);
+    momentumStart.setDate(momentumEnd.getDate() - 29);
+
+    for (const item of friendInsightsForComparison) {
+      const userLabel = item.isCurrentUser ? `${item.user.username} (You)` : item.user.username;
+      const dailyTotals = new Map<string, number>();
+      const categoriesSet = new Set<string>();
+      let momentumSpend = 0;
+
+      for (const expense of item.expenses) {
+        categoriesSet.add(expense.categoryName);
+        dailyTotals.set(expense.date, (dailyTotals.get(expense.date) ?? 0) + expense.amount);
+
+        const expenseDate = parseIsoDate(expense.date);
+        if (expenseDate >= momentumStart && expenseDate <= momentumEnd) {
+          momentumSpend += expense.amount;
+        }
+
+        if (!biggestSingleExpense || expense.amount > biggestSingleExpense.amount) {
+          biggestSingleExpense = {
+            userLabel,
+            amount: expense.amount,
+            category: expense.categoryName,
+            date: expense.date
+          };
+        }
+      }
+
+      for (const [date, amount] of dailyTotals.entries()) {
+        if (!biggestDaySpend || amount > biggestDaySpend.amount) {
+          biggestDaySpend = { userLabel, amount, date };
+        }
+      }
+
+      if (!mostDiverse || categoriesSet.size > mostDiverse.categories) {
+        mostDiverse = {
+          userLabel,
+          categories: categoriesSet.size,
+          total: item.totalSpend
+        };
+      }
+
+      if (!momentumLeader || momentumSpend > momentumLeader.amount) {
+        momentumLeader = {
+          userLabel,
+          amount: momentumSpend
+        };
+      }
+
+      const dailyValues = Array.from(dailyTotals.values());
+      if (dailyValues.length >= 3) {
+        const mean = dailyValues.reduce((sum, value) => sum + value, 0) / dailyValues.length;
+        if (mean > 0) {
+          const variance =
+            dailyValues.reduce((sum, value) => sum + (value - mean) * (value - mean), 0) / dailyValues.length;
+          const stdDev = Math.sqrt(variance);
+          const coeffVariation = stdDev / mean;
+
+          if (!mostConsistent || coeffVariation < mostConsistent.variation) {
+            mostConsistent = {
+              userLabel,
+              variation: coeffVariation,
+              activeDays: dailyValues.length
+            };
+          }
+        }
+      }
+    }
+
+    return {
+      biggestSingleExpense,
+      biggestDaySpend,
+      mostDiverse,
+      mostConsistent,
+      momentumLeader
+    };
+  }, [friendInsightsForComparison, effectiveFriendEndDate]);
+
   const filteredFriendOnlyInsights = useMemo(
     () => filteredFriendInsights.filter((item) => !item.isCurrentUser),
     [filteredFriendInsights]
@@ -741,9 +985,7 @@ export default function App() {
         friendFilterSubcategory;
       segments.push(subcategoryLabel);
     }
-    if (friendFilterStartDate || friendFilterEndDate) {
-      segments.push(`${friendFilterStartDate || '...'} to ${friendFilterEndDate || '...'}`);
-    }
+    segments.push(`${effectiveFriendStartDate} to ${effectiveFriendEndDate}`);
     segments.push(includeMeInFriendComparison ? 'Including me' : 'Friends only');
     return segments.join(' • ');
   }, [
@@ -753,8 +995,8 @@ export default function App() {
     friendFilterCategoryName,
     friendFilterSubcategory,
     friendFilterSubcategories,
-    friendFilterStartDate,
-    friendFilterEndDate,
+    effectiveFriendStartDate,
+    effectiveFriendEndDate,
     includeMeInFriendComparison
   ]);
 
@@ -924,24 +1166,6 @@ export default function App() {
   useEffect(() => {
     setMobileTrendView('trend');
   }, [range, trendCategoryId, trendSubcategory, trendStartDate, trendEndDate]);
-
-  useEffect(() => {
-    setRecentPage(1);
-  }, [
-    filteredExpenses.length,
-    selectedExpenseYear,
-    selectedExpenseMonth,
-    selectedExpenseCategoryId,
-    selectedExpenseSubcategory,
-    recentStartDate,
-    recentEndDate
-  ]);
-
-  useEffect(() => {
-    if (recentPage > totalRecentPages) {
-      setRecentPage(totalRecentPages);
-    }
-  }, [recentPage, totalRecentPages]);
 
   useEffect(() => {
     const anyModalOpen =
@@ -1359,7 +1583,12 @@ export default function App() {
                   key={key}
                   type="button"
                   className={range === key ? 'range-btn active' : 'range-btn'}
-                  onClick={() => setRange(key)}
+                  onClick={() => {
+                    const defaultRange = getDefaultTrendDateRange(key);
+                    setRange(key);
+                    setTrendStartDate(defaultRange.start);
+                    setTrendEndDate(defaultRange.end);
+                  }}
                 >
                   {key}
                 </button>
@@ -1415,11 +1644,12 @@ export default function App() {
                 type="button"
                 className="secondary"
                 onClick={() => {
+                  const defaultRange = getDefaultTrendDateRange('monthly');
                   setRange('monthly');
                   setTrendCategoryId('all');
                   setTrendSubcategory('all');
-                  setTrendStartDate('');
-                  setTrendEndDate('');
+                  setTrendStartDate(defaultRange.start);
+                  setTrendEndDate(defaultRange.end);
                 }}
               >
                 Reset
@@ -1496,14 +1726,14 @@ export default function App() {
               <input
                 id="recentStartDate"
                 type="date"
-                value={recentStartDate}
+                value={recentStartDate || recentDateBounds.start}
                 onChange={(event) => setRecentStartDate(event.target.value)}
               />
               <label htmlFor="recentEndDate">End Date</label>
               <input
                 id="recentEndDate"
                 type="date"
-                value={recentEndDate}
+                value={recentEndDate || recentDateBounds.end}
                 onChange={(event) => setRecentEndDate(event.target.value)}
               />
             </div>
@@ -1634,7 +1864,7 @@ export default function App() {
               <input
                 id="friendStartDate"
                 type="date"
-                value={friendFilterStartDate}
+                value={friendFilterStartDate || friendDateBounds.start}
                 onChange={(event) => {
                   setFriendFilterPreset('custom');
                   setFriendFilterStartDate(event.target.value);
@@ -1645,7 +1875,7 @@ export default function App() {
               <input
                 id="friendEndDate"
                 type="date"
-                value={friendFilterEndDate}
+                value={friendFilterEndDate || friendDateBounds.end}
                 onChange={(event) => {
                   setFriendFilterPreset('custom');
                   setFriendFilterEndDate(event.target.value);
@@ -1792,13 +2022,14 @@ export default function App() {
                 <label>
                   Amount (INR)
                   <input
+                    className="amount-input"
                     type="number"
                     min="0.01"
                     step="0.01"
                     required
                     value={amount}
                     onChange={(event) => setAmount(event.target.value)}
-                    placeholder="42.50"
+                    placeholder="0.00"
                   />
                 </label>
 
@@ -1826,7 +2057,7 @@ export default function App() {
                         key={category.id}
                         style={{
                           borderColor: category.color,
-                          backgroundColor: withHexAlpha(category.color, selected ? '40' : '22')
+                          backgroundColor: withHexAlpha(category.color, selected ? 'D9' : '22')
                         }}
                         onClick={() => setCategoryId(category.id)}
                       >
@@ -1861,7 +2092,7 @@ export default function App() {
                           className={selected ? 'chip subcategory-chip active' : 'chip subcategory-chip'}
                           style={{
                             borderColor: color,
-                            backgroundColor: color.replace(')', selected ? ' / 0.32)' : ' / 0.18)')
+                            backgroundColor: color.replace(')', selected ? ' / 0.72)' : ' / 0.18)')
                           }}
                           onClick={() => setSubcategoryName(subcategory.name)}
                         >
@@ -2044,8 +2275,8 @@ export default function App() {
             <p className="muted">No expenses found for the selected year/month/date filters.</p>
           ) : (
             <>
-              <ul className="expense-list">
-                {paginatedRecentExpenses.map((expense) => (
+              <ul className="expense-list recent-list-scroll">
+                {recentVisibleExpenses.map((expense) => (
                   <li key={expense.id} className="expense-item">
                     <div>
                       <p className="expense-title">{expense.description || expense.categoryName}</p>
@@ -2068,28 +2299,10 @@ export default function App() {
                   </li>
                 ))}
               </ul>
-              {totalRecentPages > 1 ? (
-                <div className="recent-pagination">
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => setRecentPage((page) => Math.max(1, page - 1))}
-                    disabled={recentPage === 1}
-                  >
-                    Previous
-                  </button>
-                  <p>
-                    Page {recentPage} of {totalRecentPages}
-                  </p>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => setRecentPage((page) => Math.min(totalRecentPages, page + 1))}
-                    disabled={recentPage === totalRecentPages}
-                  >
-                    Next
-                  </button>
-                </div>
+              {filteredExpenses.length > recentVisibleExpenses.length ? (
+                <p className="recent-limit-note muted">
+                  Showing latest {recentVisibleExpenses.length} of {filteredExpenses.length} transactions.
+                </p>
               ) : null}
             </>
           )}
@@ -2181,6 +2394,136 @@ export default function App() {
                       : currency.format(0)}
                   </strong>
                 </article>
+              </div>
+            ) : null}
+
+            <div className="friend-section">
+              <h4>Combined Spend Trend</h4>
+              <div className="friend-combined-summary">
+                <p>Total spend together</p>
+                <h5>{currency.format(friendCombinedTotal)}</h5>
+              </div>
+              <p className="muted trend-note">
+                Running total over time for all included profiles, with active filters applied.
+              </p>
+              <div className="chart-box friend-chart-box">
+                {isFriendRangeInvalid ? (
+                  <p className="muted">Fix the date range to view cumulative trend.</p>
+                ) : friendCombinedCumulativeData.length === 0 ? (
+                  <p className="muted">No cumulative spend data for selected filters.</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <AreaChart data={friendCombinedCumulativeData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
+                      <XAxis dataKey="label" tick={{ fill: '#CBD5E1', fontSize: 11 }} minTickGap={24} />
+                      <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                      <Tooltip formatter={(value: number) => currency.format(value)} />
+                      <Area
+                        type="monotone"
+                        dataKey="amount"
+                        name="Combined cumulative spend"
+                        stroke="#38BDF8"
+                        fill="#38BDF8"
+                        fillOpacity={0.16}
+                        strokeWidth={2.2}
+                        dot={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
+
+            <div className="friend-section">
+              <h4>Combined Category Bifurcation</h4>
+              <div className="chart-box friend-chart-box">
+                {isFriendRangeInvalid ? (
+                  <p className="muted">Fix the date range to view category bifurcation.</p>
+                ) : friendCombinedCategorySplitData.length === 0 ? (
+                  <p className="muted">No category data for selected filters.</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <PieChart>
+                      <Pie
+                        data={friendCombinedCategorySplitData}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={58}
+                        outerRadius={88}
+                      >
+                        {friendCombinedCategorySplitData.map((item) => (
+                          <Cell key={item.name} fill={item.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip formatter={(value: number) => currency.format(value)} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+              {friendCombinedCategorySplitData.length > 0 ? (
+                <div className="legend">
+                  {friendCombinedCategorySplitData.map((item) => (
+                    <div className="legend-item" key={item.name}>
+                      <span style={{ backgroundColor: item.color }} />
+                      <p>
+                        {item.name} <strong>{currency.format(item.value)}</strong>
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            {friendAdvancedInsights ? (
+              <div className="friend-section">
+                <h4>Deeper Insights</h4>
+                <div className="friend-highlight-grid friend-advanced-grid">
+                  <article className="friend-highlight-card">
+                    <p>Biggest Single Expense</p>
+                    <h5>{friendAdvancedInsights.biggestSingleExpense?.userLabel ?? 'No data yet'}</h5>
+                    <strong>
+                      {friendAdvancedInsights.biggestSingleExpense
+                        ? `${currency.format(friendAdvancedInsights.biggestSingleExpense.amount)} · ${friendAdvancedInsights.biggestSingleExpense.category}`
+                        : '—'}
+                    </strong>
+                  </article>
+                  <article className="friend-highlight-card">
+                    <p>Biggest One-Day Spend</p>
+                    <h5>{friendAdvancedInsights.biggestDaySpend?.userLabel ?? 'No data yet'}</h5>
+                    <strong>
+                      {friendAdvancedInsights.biggestDaySpend
+                        ? `${currency.format(friendAdvancedInsights.biggestDaySpend.amount)} · ${friendAdvancedInsights.biggestDaySpend.date}`
+                        : '—'}
+                    </strong>
+                  </article>
+                  <article className="friend-highlight-card">
+                    <p>30-Day Momentum Leader</p>
+                    <h5>{friendAdvancedInsights.momentumLeader?.userLabel ?? 'No data yet'}</h5>
+                    <strong>
+                      {friendAdvancedInsights.momentumLeader
+                        ? currency.format(friendAdvancedInsights.momentumLeader.amount)
+                        : '—'}
+                    </strong>
+                  </article>
+                  <article className="friend-highlight-card">
+                    <p>Most Consistent Daily Spend</p>
+                    <h5>{friendAdvancedInsights.mostConsistent?.userLabel ?? 'Insufficient data'}</h5>
+                    <strong>
+                      {friendAdvancedInsights.mostConsistent
+                        ? `${(friendAdvancedInsights.mostConsistent.variation * 100).toFixed(1)}% variation`
+                        : 'Need >= 3 active days'}
+                    </strong>
+                  </article>
+                  <article className="friend-highlight-card">
+                    <p>Most Diverse Categories</p>
+                    <h5>{friendAdvancedInsights.mostDiverse?.userLabel ?? 'No data yet'}</h5>
+                    <strong>
+                      {friendAdvancedInsights.mostDiverse
+                        ? `${friendAdvancedInsights.mostDiverse.categories} categories`
+                        : '—'}
+                    </strong>
+                  </article>
+                </div>
               </div>
             ) : null}
 
