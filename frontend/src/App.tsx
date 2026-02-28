@@ -29,9 +29,9 @@ import {
 } from './lib/api';
 import type { Category, Expense, FriendInsight, UserSearchResult } from './lib/types';
 
-const currency = new Intl.NumberFormat('en-US', {
+const currency = new Intl.NumberFormat('en-IN', {
   style: 'currency',
-  currency: 'USD',
+  currency: 'INR',
   maximumFractionDigits: 2
 });
 
@@ -1437,7 +1437,7 @@ export default function App() {
 
             <form className="expense-form" onSubmit={onAddExpense}>
               <label>
-                Amount (USD)
+                Amount (INR)
                 <input
                   type="number"
                   min="0.01"
