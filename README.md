@@ -1,86 +1,69 @@
-# BudgetPulse Prototype (React + Java + Firebase)
+# BudgetPulse Prototype (React + Firebase)
 
-First prototype for a **multi-user budget web app** with a mobile-first UI, custom categories, and spending trend analytics.
+Mobile-first budget web app for multi-user expense tracking with categories, trends, and friend comparisons.
 
 ## Stack
 - Frontend: React + TypeScript + Vite + Recharts
-- Backend: Java 17 + Spring Boot
-- Data store: Firebase Firestore
+- Data store: Firebase Firestore (direct client SDK)
+- Hosting: Any static hosting (GitHub Pages, Firebase Hosting, Render Static Site)
 
 ## Current functionality
-1. Add and track expenses with amount, date, category, notes.
-2. Delete previously added expenses.
-3. Predefined categories (Food, Travel, Shopping, Rent, Utilities, etc.).
-4. Create custom categories with custom color.
-5. Choose custom quick-select categories for expense entry.
-6. Filter recent expense list by year, month, and start/end date (via filter popup).
-7. Analytics visualizations:
-   - Daily trend (last 30 days)
-   - Monthly trend (last 12 months)
-   - Yearly trend (last 5 years)
-   - Trend filter by category (or all categories)
-   - Trend filter by start/end date (via filter popup)
-   - Category split chart
-8. Multi-user data separation (prototype-level) via `X-User-Id` header; UI lets you switch user quickly.
+1. Track expenses with amount, date, category, and notes.
+2. Delete added expenses.
+3. Use predefined categories and create custom categories.
+4. Choose custom quick-select categories for fast entry.
+5. Filter recent expenses by year, month, and start/end date.
+6. View daily/monthly/yearly trend analytics and category split.
+7. Switch profile by username (no auth in this prototype).
+8. Enforce unique usernames (case-insensitive) when creating users.
+9. Search users and add/remove friends.
+10. Compare spending with friends (total spend chart, top category per person, and friend recents).
 
 ## Project structure
-- `frontend/` React app
-- `backend/` Spring Boot API
+- `frontend/` React app (Firebase-only)
+- `backend/` legacy Spring Boot code from earlier prototype (not required by current frontend)
 
 ## Prerequisites
 - Node.js 18+
-- Java 17+
-- Maven 3.9+
 - Firebase project with Firestore enabled
-- Firebase service account JSON key
 
 ## Firebase setup
-1. Create a Firebase project.
-2. Enable Firestore.
-3. Create a service account key JSON.
-4. Set environment variables:
-   - `FIREBASE_PROJECT_ID`
-   - `GOOGLE_APPLICATION_CREDENTIALS` (absolute path to service-account JSON)
+1. Create Firebase project.
+2. Enable Firestore database.
+3. In Firebase project settings, copy Web App config values.
+4. Set frontend env vars in `frontend/.env`:
+   - `VITE_FIREBASE_API_KEY`
+   - `VITE_FIREBASE_AUTH_DOMAIN`
+   - `VITE_FIREBASE_PROJECT_ID`
+   - `VITE_FIREBASE_STORAGE_BUCKET`
+   - `VITE_FIREBASE_MESSAGING_SENDER_ID`
+   - `VITE_FIREBASE_APP_ID`
 
-See `backend/.env.example`.
-
-## Run backend
-```bash
-cd backend
-export FIREBASE_PROJECT_ID=your-project-id
-export GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/service-account.json
-mvn spring-boot:run
-```
-
-Backend runs on `http://localhost:8080`.
+Use `frontend/.env.example` as template.
 
 ## Run frontend
 ```bash
 cd frontend
-cp .env.example .env
 npm install
 npm run dev
 ```
 
 Frontend runs on `http://localhost:5173`.
 
-## API overview
-- `GET /api/categories` - list predefined + custom categories
-- `POST /api/categories` - create custom category
-- `GET /api/expenses` - list expenses
-- `POST /api/expenses` - create expense
-- `DELETE /api/expenses/{expenseId}` - delete expense
-- `GET /api/analytics?range=daily|monthly|yearly` - trends and category totals
+## Firestore collections used
+- `usernames/{normalizedUsername}`
+- `users/{normalizedUsername}`
+- `users/{normalizedUsername}/categories/{categoryId}`
+- `users/{normalizedUsername}/expenses/{expenseId}`
 
-All endpoints require `X-User-Id` header.
+## Deployment
+- Deploy frontend as static site:
+  - GitHub Pages
+  - Firebase Hosting
+  - Render Static Site
 
-## Deployment guidance
-- Store code in GitHub.
-- Frontend can be hosted on GitHub Pages, Vercel, or Netlify.
-- Backend (Spring Boot) cannot run on GitHub Pages; use Render, Railway, Fly.io, or Cloud Run.
-- Use a managed Firebase service account strategy (secret manager / environment secrets).
+No Java backend deployment is required for this Firebase-only version.
 
-## Notes for next iteration
-- Replace `X-User-Id` with real auth (Firebase Auth + JWT verification in backend).
-- Add expense editing and budget goals.
-- Add tests and CI workflows.
+## Notes
+- This prototype has no authentication yet.
+- Add Firebase Auth + Firestore rules before production use.

@@ -28,6 +28,31 @@ export type Analytics = {
   trend: TrendPoint[];
 };
 
+export type UserProfile = {
+  id: string;
+  username: string;
+  usernameLower: string;
+  friends: string[];
+  createdAt: string;
+};
+
+export type UserSearchResult = {
+  id: string;
+  username: string;
+  usernameLower: string;
+};
+
+export type FriendInsight = {
+  user: UserProfile;
+  isCurrentUser: boolean;
+  totalSpend: number;
+  topCategory: {
+    name: string;
+    amount: number;
+  } | null;
+  recentExpenses: Expense[];
+};
+
 export type CreateExpensePayload = {
   amount: number;
   categoryId: string;

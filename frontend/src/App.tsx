@@ -2,6 +2,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Cell,
   Pie,
@@ -12,20 +14,31 @@ import {
   YAxis
 } from 'recharts';
 import {
+  addFriendByUsername,
   createCategory,
   createExpense,
+  createUser,
   deleteExpense,
-  fetchAnalytics,
+  ensureUserProfile,
   fetchCategories,
-  fetchExpenses
+  fetchExpenses,
+  fetchFriendInsights,
+  getUserByUsername,
+  removeFriend,
+  searchUsers
 } from './lib/api';
-import type { Analytics, Category, Expense } from './lib/types';
+import type { Category, Expense, FriendInsight, UserSearchResult } from './lib/types';
 
 const currency = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
   maximumFractionDigits: 2
 });
+
+const USER_STORAGE_KEY = 'budget-user-id';
+const DEFAULT_USERNAME = 'demo_user_1';
+
+type MobileTab = 'add' | 'trends' | 'recent' | 'friends';
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
@@ -40,6 +53,30 @@ function monthName(monthCode: string): string {
 function parseIsoDate(value: string): Date {
   const [year, month, day] = value.split('-').map(Number);
   return new Date(year, month - 1, day);
+}
+
+function rangeWindowStart(range: 'daily' | 'monthly' | 'yearly', endDate: Date): Date {
+  if (range === 'daily') {
+    const start = new Date(endDate);
+    start.setDate(endDate.getDate() - 29);
+    return start;
+  }
+
+  if (range === 'yearly') {
+    return new Date(endDate.getFullYear() - 4, 0, 1);
+  }
+
+  return new Date(endDate.getFullYear(), endDate.getMonth() - 11, 1);
+}
+
+function filterExpensesByPresetRange(expenses: Expense[], range: 'daily' | 'monthly' | 'yearly'): Expense[] {
+  const endDate = new Date();
+  const startDate = rangeWindowStart(range, endDate);
+
+  return expenses.filter((expense) => {
+    const expenseDate = parseIsoDate(expense.date);
+    return expenseDate >= startDate && expenseDate <= endDate;
+  });
 }
 
 function buildTrendData(
@@ -68,13 +105,8 @@ function buildTrendData(
 
   if (startDate) {
     normalizedStart = parseIsoDate(startDate);
-  } else if (range === 'daily') {
-    normalizedStart = new Date(normalizedEnd);
-    normalizedStart.setDate(normalizedEnd.getDate() - 29);
-  } else if (range === 'yearly') {
-    normalizedStart = new Date(normalizedEnd.getFullYear() - 4, 0, 1);
   } else {
-    normalizedStart = new Date(normalizedEnd.getFullYear(), normalizedEnd.getMonth() - 11, 1);
+    normalizedStart = rangeWindowStart(range, normalizedEnd);
   }
 
   if (normalizedStart > normalizedEnd) {
@@ -96,6 +128,7 @@ function buildTrendData(
   } else {
     const cursor = new Date(normalizedStart.getFullYear(), normalizedStart.getMonth(), 1);
     const endMonth = new Date(normalizedEnd.getFullYear(), normalizedEnd.getMonth(), 1);
+
     while (cursor <= endMonth) {
       const key = `${cursor.getFullYear()}-${pad(cursor.getMonth() + 1)}`;
       keyTotals.set(key, { label: monthFmt.format(cursor), amount: 0 });
@@ -119,41 +152,48 @@ function buildTrendData(
     }
 
     const bucket = keyTotals.get(key);
-    if (bucket) {
-      bucket.amount += Number(expense.amount);
-      keyTotals.set(key, bucket);
+    if (!bucket) {
+      continue;
     }
+
+    bucket.amount += Number(expense.amount);
+    keyTotals.set(key, bucket);
   }
 
   return Array.from(keyTotals.values());
 }
 
 function readErrorMessage(error: unknown, fallback: string): string {
-  if (typeof error === 'object' && error !== null && 'response' in error) {
-    const response = (error as { response?: { data?: { message?: string } } }).response;
-    if (response?.data?.message) {
-      return response.data.message;
+  if (error instanceof Error && error.message) {
+    if (error.message === 'USERNAME_EXISTS') {
+      return 'Username already exists. Choose a different username.';
     }
+    return error.message;
   }
   return fallback;
 }
 
 export default function App() {
-  const [userId, setUserId] = useState(() => localStorage.getItem('budget-user-id') ?? 'demo-user-1');
-  const [draftUserId, setDraftUserId] = useState(userId);
+  const [userId, setUserId] = useState(() => localStorage.getItem(USER_STORAGE_KEY) ?? DEFAULT_USERNAME);
+  const [userName, setUserName] = useState(userId);
+  const [draftSwitchUsername, setDraftSwitchUsername] = useState(userId);
+  const [draftCreateUsername, setDraftCreateUsername] = useState('');
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [friendInsights, setFriendInsights] = useState<FriendInsight[]>([]);
+
   const [range, setRange] = useState<'daily' | 'monthly' | 'yearly'>('monthly');
   const [trendCategoryId, setTrendCategoryId] = useState('all');
-  const [mobileTab, setMobileTab] = useState<'add' | 'trends' | 'recent'>('add');
+  const [mobileTab, setMobileTab] = useState<MobileTab>('add');
   const [mobileTrendView, setMobileTrendView] = useState<'trend' | 'split'>('trend');
   const [recentPage, setRecentPage] = useState(1);
+
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [isTrendFilterModalOpen, setIsTrendFilterModalOpen] = useState(false);
   const [isRecentFilterModalOpen, setIsRecentFilterModalOpen] = useState(false);
   const [isQuickSelectModalOpen, setIsQuickSelectModalOpen] = useState(false);
+
   const [quickCategoryIds, setQuickCategoryIds] = useState<string[]>([]);
   const [draftQuickCategoryIds, setDraftQuickCategoryIds] = useState<string[]>([]);
 
@@ -165,6 +205,7 @@ export default function App() {
   const [showCategoryForm, setShowCategoryForm] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newCategoryColor, setNewCategoryColor] = useState('#0EA5E9');
+
   const [selectedExpenseYear, setSelectedExpenseYear] = useState('all');
   const [selectedExpenseMonth, setSelectedExpenseMonth] = useState('all');
   const [recentStartDate, setRecentStartDate] = useState('');
@@ -172,8 +213,15 @@ export default function App() {
   const [trendStartDate, setTrendStartDate] = useState('');
   const [trendEndDate, setTrendEndDate] = useState('');
 
+  const [friendSearchTerm, setFriendSearchTerm] = useState('');
+  const [friendSearchResults, setFriendSearchResults] = useState<UserSearchResult[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [searchingFriends, setSearchingFriends] = useState(false);
+  const [managingProfile, setManagingProfile] = useState(false);
+  const [addingFriendUsername, setAddingFriendUsername] = useState('');
+  const [removingFriendId, setRemovingFriendId] = useState('');
   const [deletingExpenseId, setDeletingExpenseId] = useState('');
   const [error, setError] = useState('');
 
@@ -182,34 +230,44 @@ export default function App() {
     setError('');
 
     try {
-      const [categoryData, expenseData, analyticsData] = await Promise.all([
-        fetchCategories(userId),
-        fetchExpenses(userId),
-        fetchAnalytics(userId, range)
+      const profile = await ensureUserProfile(userId);
+
+      if (profile.id !== userId) {
+        setUserId(profile.id);
+        return;
+      }
+
+      const [categoryData, expenseData, friendData] = await Promise.all([
+        fetchCategories(profile.id),
+        fetchExpenses(profile.id),
+        fetchFriendInsights(profile.id)
       ]);
 
+      setUserName(profile.username);
       setCategories(categoryData);
       setExpenses(expenseData);
-      setAnalytics(analyticsData);
+      setFriendInsights(friendData);
       setCategoryId((current) => {
         if (categoryData.length === 0) {
           return '';
         }
+
         if (current && categoryData.some((category) => category.id === current)) {
           return current;
         }
+
         return categoryData[0].id;
       });
     } catch (requestError) {
-      setError(readErrorMessage(requestError, 'Failed to load your budget data.'));
+      setError(readErrorMessage(requestError, 'Failed to load budget data from Firebase.'));
     } finally {
       setLoading(false);
     }
-  }, [userId, range]);
+  }, [userId]);
 
   useEffect(() => {
-    localStorage.setItem('budget-user-id', userId);
-    setDraftUserId(userId);
+    localStorage.setItem(USER_STORAGE_KEY, userId);
+    setDraftSwitchUsername(userId);
     setSelectedExpenseYear('all');
     setSelectedExpenseMonth('all');
     setRecentStartDate('');
@@ -217,9 +275,12 @@ export default function App() {
     setTrendStartDate('');
     setTrendEndDate('');
     setTrendCategoryId('all');
+    setFriendSearchTerm('');
+    setFriendSearchResults([]);
     setIsTrendFilterModalOpen(false);
     setIsRecentFilterModalOpen(false);
     setIsQuickSelectModalOpen(false);
+
     try {
       const rawQuickCategories = localStorage.getItem(`budget-quick-categories-${userId}`);
       if (!rawQuickCategories) {
@@ -245,23 +306,35 @@ export default function App() {
     void loadData();
   }, [loadData]);
 
-  const totalThisRange = analytics?.totalSpend ?? 0;
+  const rangeExpenses = useMemo(() => filterExpensesByPresetRange(expenses, range), [expenses, range]);
+
+  const totalThisRange = useMemo(
+    () => rangeExpenses.reduce((sum, expense) => sum + Number(expense.amount), 0),
+    [rangeExpenses]
+  );
 
   const pieData = useMemo(() => {
-    if (!analytics) {
-      return [];
+    const totalsByCategory = new Map<string, number>();
+    for (const expense of rangeExpenses) {
+      totalsByCategory.set(
+        expense.categoryName,
+        (totalsByCategory.get(expense.categoryName) ?? 0) + Number(expense.amount)
+      );
     }
 
     const colorByName = new Map(categories.map((category) => [category.name, category.color]));
 
-    return Object.entries(analytics.totalsByCategory).map(([name, value]) => ({
-      name,
-      value,
-      color: colorByName.get(name) ?? '#64748B'
-    }));
-  }, [analytics, categories]);
+    return Array.from(totalsByCategory.entries())
+      .map(([name, value]) => ({
+        name,
+        value,
+        color: colorByName.get(name) ?? '#64748B'
+      }))
+      .sort((left, right) => right.value - left.value);
+  }, [categories, rangeExpenses]);
 
   const isTrendRangeInvalid = Boolean(trendStartDate && trendEndDate && trendStartDate > trendEndDate);
+
   const trendData = useMemo(() => {
     if (isTrendRangeInvalid) {
       return [];
@@ -273,6 +346,7 @@ export default function App() {
     if (trendCategoryId === 'all') {
       return 'All categories';
     }
+
     return categories.find((category) => category.id === trendCategoryId)?.name ?? 'All categories';
   }, [categories, trendCategoryId]);
 
@@ -296,6 +370,7 @@ export default function App() {
         .filter((expense) => selectedExpenseYear === 'all' || expense.date.startsWith(selectedExpenseYear))
         .map((expense) => expense.date.slice(5, 7))
     );
+
     return Array.from(months).sort((a, b) => a.localeCompare(b));
   }, [expenses, selectedExpenseYear]);
 
@@ -314,11 +389,31 @@ export default function App() {
   const isRecentRangeInvalid = Boolean(recentStartDate && recentEndDate && recentStartDate > recentEndDate);
   const recentPageSize = 4;
   const totalRecentPages = Math.max(1, Math.ceil(filteredExpenses.length / recentPageSize));
+
   const paginatedRecentExpenses = useMemo(() => {
     const from = (recentPage - 1) * recentPageSize;
     const to = from + recentPageSize;
     return filteredExpenses.slice(from, to);
   }, [filteredExpenses, recentPage]);
+
+  const friendIdSet = useMemo(() => {
+    const insight = friendInsights.find((item) => item.isCurrentUser);
+    return new Set(insight?.user.friends ?? []);
+  }, [friendInsights]);
+
+  const friendComparisonData = useMemo(
+    () =>
+      friendInsights.map((item) => ({
+        name: item.isCurrentUser ? `${item.user.username} (You)` : item.user.username,
+        amount: Number(item.totalSpend.toFixed(2))
+      })),
+    [friendInsights]
+  );
+
+  const friendOnlyInsights = useMemo(
+    () => friendInsights.filter((item) => !item.isCurrentUser),
+    [friendInsights]
+  );
 
   useEffect(() => {
     if (selectedExpenseYear !== 'all' && !expenseYears.includes(selectedExpenseYear)) {
@@ -392,9 +487,11 @@ export default function App() {
       if (current.includes(categoryIdValue)) {
         return current.filter((id) => id !== categoryIdValue);
       }
+
       if (current.length >= 8) {
         return current;
       }
+
       return [...current, categoryIdValue];
     });
   }
@@ -435,6 +532,7 @@ export default function App() {
 
   async function onAddCategory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     if (!newCategoryName.trim()) {
       return;
     }
@@ -448,7 +546,7 @@ export default function App() {
         color: newCategoryColor
       });
 
-      setCategories((prev) => [...prev, created]);
+      setCategories((previous) => [...previous, created].sort((a, b) => a.name.localeCompare(b.name)));
       setCategoryId(created.id);
       setNewCategoryName('');
       setShowCategoryForm(false);
@@ -477,56 +575,160 @@ export default function App() {
     }
   }
 
+  async function onSwitchExistingUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    setManagingProfile(true);
+    setError('');
+
+    try {
+      const existing = await getUserByUsername(draftSwitchUsername);
+      if (!existing) {
+        throw new Error('Username not found. Create it first.');
+      }
+
+      setUserId(existing.id);
+      setDraftCreateUsername('');
+      setIsUserModalOpen(false);
+    } catch (requestError) {
+      setError(readErrorMessage(requestError, 'Failed to switch user.'));
+    } finally {
+      setManagingProfile(false);
+    }
+  }
+
+  async function onCreateUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    setManagingProfile(true);
+    setError('');
+
+    try {
+      const created = await createUser(draftCreateUsername);
+      setUserId(created.id);
+      setDraftSwitchUsername(created.username);
+      setDraftCreateUsername('');
+      setIsUserModalOpen(false);
+    } catch (requestError) {
+      setError(readErrorMessage(requestError, 'Failed to create user.'));
+    } finally {
+      setManagingProfile(false);
+    }
+  }
+
+  async function onSearchFriends(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!friendSearchTerm.trim()) {
+      setFriendSearchResults([]);
+      return;
+    }
+
+    setSearchingFriends(true);
+    setError('');
+
+    try {
+      const results = await searchUsers(friendSearchTerm, userId);
+      setFriendSearchResults(results);
+    } catch (requestError) {
+      setError(readErrorMessage(requestError, 'Failed to search usernames.'));
+    } finally {
+      setSearchingFriends(false);
+    }
+  }
+
+  async function onAddFriend(username: string) {
+    setAddingFriendUsername(username);
+    setError('');
+
+    try {
+      await addFriendByUsername(userId, username);
+      setFriendSearchResults((previous) => previous.filter((item) => item.username !== username));
+      await loadData();
+    } catch (requestError) {
+      setError(readErrorMessage(requestError, 'Failed to add friend.'));
+    } finally {
+      setAddingFriendUsername('');
+    }
+  }
+
+  async function onRemoveFriend(friendId: string) {
+    setRemovingFriendId(friendId);
+    setError('');
+
+    try {
+      await removeFriend(userId, friendId);
+      await loadData();
+    } catch (requestError) {
+      setError(readErrorMessage(requestError, 'Failed to remove friend.'));
+    } finally {
+      setRemovingFriendId('');
+    }
+  }
+
   return (
     <main className="page-shell">
       <div className="bg-orb bg-orb-top" />
       <div className="bg-orb bg-orb-bottom" />
 
       <section className="hero-card glass">
-        <p className="eyebrow app-title">BudgetPulse</p>
+        <div>
+          <p className="eyebrow app-title">BudgetPulse</p>
+          <p className="hero-quote">Track today so tomorrow feels lighter.</p>
+          <p className="hero-user">@{userName}</p>
+        </div>
         <button
           type="button"
           className="profile-btn"
-          onClick={() => setIsUserModalOpen(true)}
-          aria-label="Open profile and switch user"
-          title={`Current user: ${userId}`}
+          onClick={() => {
+            setDraftSwitchUsername(userName);
+            setDraftCreateUsername('');
+            setIsUserModalOpen(true);
+          }}
+          aria-label="Open profile and user switch"
+          title={`Current user: ${userName}`}
         >
-          <span>{userId.trim().charAt(0).toUpperCase() || 'U'}</span>
+          <span>{userName.trim().charAt(0).toUpperCase() || 'U'}</span>
         </button>
       </section>
 
       {isUserModalOpen ? (
         <div className="modal-backdrop" onClick={() => setIsUserModalOpen(false)}>
           <div className="modal-card glass" onClick={(event) => event.stopPropagation()}>
-            <h3>Switch User</h3>
-            <p>Enter a user ID to load that account.</p>
-            <form
-              className="user-switcher"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (draftUserId.trim()) {
-                  setUserId(draftUserId.trim());
-                  setIsUserModalOpen(false);
-                }
-              }}
-            >
-              <label htmlFor="userId">User ID</label>
+            <h3>Profile</h3>
+            <p>Current username: @{userName}</p>
+
+            <form className="user-switcher" onSubmit={onSwitchExistingUser}>
+              <label htmlFor="switchUser">Switch to existing username</label>
               <input
-                id="userId"
-                value={draftUserId}
-                onChange={(event) => setDraftUserId(event.target.value)}
-                placeholder="e.g. rahul"
-                autoFocus
+                id="switchUser"
+                value={draftSwitchUsername}
+                onChange={(event) => setDraftSwitchUsername(event.target.value)}
+                placeholder="e.g. rahul_13"
               />
-              <div className="modal-actions">
-                <button type="button" className="secondary" onClick={() => setIsUserModalOpen(false)}>
-                  Cancel
-                </button>
-                <button type="submit" className="primary">
-                  Switch
-                </button>
-              </div>
+              <button type="submit" className="secondary" disabled={managingProfile}>
+                {managingProfile ? 'Switching...' : 'Switch User'}
+              </button>
             </form>
+
+            <form className="user-switcher" onSubmit={onCreateUser}>
+              <label htmlFor="createUser">Create new username</label>
+              <input
+                id="createUser"
+                value={draftCreateUsername}
+                onChange={(event) => setDraftCreateUsername(event.target.value)}
+                placeholder="3-24 chars: letters, numbers, _, -"
+              />
+              <button type="submit" className="primary" disabled={managingProfile}>
+                {managingProfile ? 'Creating...' : 'Create User'}
+              </button>
+            </form>
+
+            <div className="modal-actions">
+              <button type="button" className="secondary" onClick={() => setIsUserModalOpen(false)}>
+                Close
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
@@ -716,8 +918,8 @@ export default function App() {
           <h2>{expenses.length}</h2>
         </article>
         <article className="metric-card glass">
-          <p>Active Categories</p>
-          <h2>{categories.length}</h2>
+          <p>Friends Connected</p>
+          <h2>{friendOnlyInsights.length}</h2>
         </article>
       </section>
 
@@ -727,7 +929,7 @@ export default function App() {
           className={mobileTab === 'add' ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
           onClick={() => setMobileTab('add')}
         >
-          Add Expense
+          Add
         </button>
         <button
           type="button"
@@ -743,124 +945,129 @@ export default function App() {
         >
           Recent
         </button>
+        <button
+          type="button"
+          className={mobileTab === 'friends' ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
+          onClick={() => setMobileTab('friends')}
+        >
+          Friends
+        </button>
       </nav>
 
       <div className="mobile-main">
         <section className="content-grid">
-          <article className={mobileTab === 'add' ? 'panel glass mobile-panel-add is-active' : 'panel glass mobile-panel-add'}>
-          <div className="panel-head">
-            <h3>Add Expense</h3>
-            <span>Track small. Save big.</span>
-          </div>
-
-          <form className="expense-form" onSubmit={onAddExpense}>
-            <label>
-              Amount (USD)
-              <input
-                type="number"
-                min="0.01"
-                step="0.01"
-                required
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                placeholder="42.50"
-              />
-            </label>
-
-            <label>
-              Date
-              <input
-                type="date"
-                required
-                value={expenseDate}
-                onChange={(event) => setExpenseDate(event.target.value)}
-              />
-            </label>
-
-            <label>
-              Category
-              <select
-                required
-                value={categoryId}
-                onChange={(event) => setCategoryId(event.target.value)}
-              >
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div className="chips-row">
-              <div className="chips">
-                {quickCategories.map((category) => (
-                  <button
-                    type="button"
-                    className={category.id === categoryId ? 'chip active' : 'chip'}
-                    key={category.id}
-                    style={{ borderColor: category.color }}
-                    onClick={() => setCategoryId(category.id)}
-                  >
-                    {category.name}
-                  </button>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="quick-chip-edit-btn"
-                onClick={openQuickSelectModal}
-                aria-label="Edit quick select categories"
-                title="Edit quick select categories"
-              >
-                ✎
-              </button>
+          <article
+            className={mobileTab === 'add' ? 'panel glass mobile-panel-add is-active' : 'panel glass mobile-panel-add'}
+          >
+            <div className="panel-head">
+              <h3>Add Expense</h3>
+              <span>Every entry sharpens your money decisions.</span>
             </div>
 
-            <label>
-              Notes (optional)
-              <input
-                value={description}
-                maxLength={120}
-                onChange={(event) => setDescription(event.target.value)}
-                placeholder="Dinner with team"
-              />
-            </label>
-
-            <button className="primary" type="submit" disabled={submitting}>
-              {submitting ? 'Saving...' : 'Add Expense'}
-            </button>
-          </form>
-
-          <div className="custom-category">
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setShowCategoryForm((prev) => !prev)}
-            >
-              {showCategoryForm ? 'Close Custom Category' : 'Create Custom Category'}
-            </button>
-
-            {showCategoryForm ? (
-              <form className="category-form" onSubmit={onAddCategory}>
+            <form className="expense-form" onSubmit={onAddExpense}>
+              <label>
+                Amount (USD)
                 <input
-                  placeholder="Category name"
-                  maxLength={30}
-                  value={newCategoryName}
-                  onChange={(event) => setNewCategoryName(event.target.value)}
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  required
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  placeholder="42.50"
                 />
+              </label>
+
+              <label>
+                Date
                 <input
-                  type="color"
-                  value={newCategoryColor}
-                  onChange={(event) => setNewCategoryColor(event.target.value)}
+                  type="date"
+                  required
+                  value={expenseDate}
+                  onChange={(event) => setExpenseDate(event.target.value)}
                 />
-                <button type="submit" className="primary" disabled={submitting}>
-                  Add
+              </label>
+
+              <label>
+                Category
+                <select required value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>
+                  {categories.map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {category.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="chips-row">
+                <div className="chips">
+                  {quickCategories.map((category) => (
+                    <button
+                      type="button"
+                      className={category.id === categoryId ? 'chip active' : 'chip'}
+                      key={category.id}
+                      style={{ borderColor: category.color }}
+                      onClick={() => setCategoryId(category.id)}
+                    >
+                      {category.name}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="quick-chip-edit-btn"
+                  onClick={openQuickSelectModal}
+                  aria-label="Edit quick select categories"
+                  title="Edit quick select categories"
+                >
+                  ✎
                 </button>
-              </form>
-            ) : null}
-          </div>
-        </article>
+              </div>
+
+              <label>
+                Notes (optional)
+                <input
+                  value={description}
+                  maxLength={120}
+                  onChange={(event) => setDescription(event.target.value)}
+                  placeholder="Dinner with team"
+                />
+              </label>
+
+              <button className="primary" type="submit" disabled={submitting || loading || categories.length === 0}>
+                {submitting ? 'Saving...' : 'Add Expense'}
+              </button>
+            </form>
+
+            <div className="custom-category">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setShowCategoryForm((previous) => !previous)}
+              >
+                {showCategoryForm ? 'Close Custom Category' : 'Create Custom Category'}
+              </button>
+
+              {showCategoryForm ? (
+                <form className="category-form" onSubmit={onAddCategory}>
+                  <input
+                    placeholder="Category name"
+                    maxLength={30}
+                    value={newCategoryName}
+                    onChange={(event) => setNewCategoryName(event.target.value)}
+                  />
+                  <input
+                    type="color"
+                    value={newCategoryColor}
+                    onChange={(event) => setNewCategoryColor(event.target.value)}
+                  />
+                  <button type="submit" className="primary" disabled={submitting}>
+                    Add
+                  </button>
+                </form>
+              ) : null}
+            </div>
+          </article>
 
           <article
             className={
@@ -869,108 +1076,116 @@ export default function App() {
                 : 'panel glass wide-panel mobile-panel-trends'
             }
           >
-          <div className="panel-head">
-            <h3>Insights & Trends</h3>
-            <button
-              type="button"
-              className="secondary filter-trigger-btn"
-              onClick={() => setIsTrendFilterModalOpen(true)}
-            >
-              Filters
-            </button>
-          </div>
-
-          <div className="mobile-trend-switch">
-            <button
-              type="button"
-              className={mobileTrendView === 'trend' ? 'range-btn active' : 'range-btn'}
-              onClick={() => setMobileTrendView('trend')}
-            >
-              Trend
-            </button>
-            <button
-              type="button"
-              className={mobileTrendView === 'split' ? 'range-btn active' : 'range-btn'}
-              onClick={() => setMobileTrendView('split')}
-            >
-              Category Split
-            </button>
-          </div>
-
-          <div className="chart-grid">
-            <div className={mobileTrendView === 'trend' ? 'chart-wrap mobile-chart-trend is-active' : 'chart-wrap mobile-chart-trend'}>
-              <h4>Spending Trend</h4>
-              <p className="muted trend-note">{selectedTrendCategoryName}</p>
-              <div className="chart-box">
-                {isTrendRangeInvalid ? (
-                  <p className="muted">Trend start date must be on or before end date.</p>
-                ) : loading ? (
-                  <p className="muted">Loading trend...</p>
-                ) : trendData.length === 0 ? (
-                  <p className="muted">No trend data for selected filters.</p>
-                ) : (
-                  <ResponsiveContainer width="100%" height={260}>
-                    <AreaChart data={trendData}>
-                      <defs>
-                        <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#0EA5E9" stopOpacity={0.7} />
-                          <stop offset="95%" stopColor="#0EA5E9" stopOpacity={0.1} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
-                      <XAxis dataKey="label" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
-                      <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
-                      <Tooltip
-                        contentStyle={{
-                          background: '#0f172a',
-                          border: '1px solid rgba(148, 163, 184, 0.2)',
-                          borderRadius: '10px'
-                        }}
-                        formatter={(value: number) => currency.format(value)}
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="amount"
-                        stroke="#38BDF8"
-                        fillOpacity={1}
-                        fill="url(#trendFill)"
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
+            <div className="panel-head">
+              <h3>Insights & Trends</h3>
+              <button
+                type="button"
+                className="secondary filter-trigger-btn"
+                onClick={() => setIsTrendFilterModalOpen(true)}
+              >
+                Filters
+              </button>
             </div>
 
-            <div className={mobileTrendView === 'split' ? 'chart-wrap mobile-chart-split is-active' : 'chart-wrap mobile-chart-split'}>
-              <h4>Category Split</h4>
-              <div className="chart-box">
-                {pieData.length === 0 ? (
-                  <p className="muted">Add expenses to unlock category split.</p>
-                ) : (
-                  <ResponsiveContainer width="100%" height={260}>
-                    <PieChart>
-                      <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={58} outerRadius={92}>
-                        {pieData.map((item) => (
-                          <Cell key={item.name} fill={item.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value: number) => currency.format(value)} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                )}
+            <div className="mobile-trend-switch">
+              <button
+                type="button"
+                className={mobileTrendView === 'trend' ? 'range-btn active' : 'range-btn'}
+                onClick={() => setMobileTrendView('trend')}
+              >
+                Trend
+              </button>
+              <button
+                type="button"
+                className={mobileTrendView === 'split' ? 'range-btn active' : 'range-btn'}
+                onClick={() => setMobileTrendView('split')}
+              >
+                Category Split
+              </button>
+            </div>
+
+            <div className="chart-grid">
+              <div
+                className={
+                  mobileTrendView === 'trend' ? 'chart-wrap mobile-chart-trend is-active' : 'chart-wrap mobile-chart-trend'
+                }
+              >
+                <h4>Spending Trend</h4>
+                <p className="muted trend-note">{selectedTrendCategoryName}</p>
+                <div className="chart-box">
+                  {isTrendRangeInvalid ? (
+                    <p className="muted">Trend start date must be on or before end date.</p>
+                  ) : loading ? (
+                    <p className="muted">Loading trend...</p>
+                  ) : trendData.length === 0 ? (
+                    <p className="muted">No trend data for selected filters.</p>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={250}>
+                      <AreaChart data={trendData}>
+                        <defs>
+                          <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#0EA5E9" stopOpacity={0.7} />
+                            <stop offset="95%" stopColor="#0EA5E9" stopOpacity={0.1} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
+                        <XAxis dataKey="label" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                        <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                        <Tooltip
+                          contentStyle={{
+                            background: '#0f172a',
+                            border: '1px solid rgba(148, 163, 184, 0.2)',
+                            borderRadius: '10px'
+                          }}
+                          formatter={(value: number) => currency.format(value)}
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="amount"
+                          stroke="#38BDF8"
+                          fillOpacity={1}
+                          fill="url(#trendFill)"
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
               </div>
-              <div className="legend">
-                {pieData.map((item) => (
-                  <div className="legend-item" key={item.name}>
-                    <span style={{ backgroundColor: item.color }} />
-                    <p>
-                      {item.name} <strong>{currency.format(item.value)}</strong>
-                    </p>
-                  </div>
-                ))}
+
+              <div
+                className={
+                  mobileTrendView === 'split' ? 'chart-wrap mobile-chart-split is-active' : 'chart-wrap mobile-chart-split'
+                }
+              >
+                <h4>Category Split ({range})</h4>
+                <div className="chart-box">
+                  {pieData.length === 0 ? (
+                    <p className="muted">Add expenses to unlock category split.</p>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={250}>
+                      <PieChart>
+                        <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={56} outerRadius={90}>
+                          {pieData.map((item) => (
+                            <Cell key={item.name} fill={item.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(value: number) => currency.format(value)} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+                <div className="legend">
+                  {pieData.map((item) => (
+                    <div className="legend-item" key={item.name}>
+                      <span style={{ backgroundColor: item.color }} />
+                      <p>
+                        {item.name} <strong>{currency.format(item.value)}</strong>
+                      </p>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
           </article>
         </section>
 
@@ -979,76 +1194,210 @@ export default function App() {
             mobileTab === 'recent' ? 'panel glass mobile-panel-recent is-active' : 'panel glass mobile-panel-recent'
           }
         >
-        <div className="panel-head recent-head">
-          <div>
-            <h3>Recent Expenses</h3>
-            <span>Newest first</span>
+          <div className="panel-head recent-head">
+            <div>
+              <h3>Recent Expenses</h3>
+              <span>Newest first</span>
+            </div>
+            <button
+              type="button"
+              className="secondary filter-trigger-btn"
+              onClick={() => setIsRecentFilterModalOpen(true)}
+            >
+              Filters
+            </button>
           </div>
-          <button
-            type="button"
-            className="secondary filter-trigger-btn"
-            onClick={() => setIsRecentFilterModalOpen(true)}
-          >
-            Filters
-          </button>
-        </div>
 
-        {expenses.length === 0 ? (
-          <p className="muted">No expenses yet for this user. Add your first one above.</p>
-        ) : isRecentRangeInvalid ? (
-          <p className="muted">Recent start date must be on or before end date.</p>
-        ) : filteredExpenses.length === 0 ? (
-          <p className="muted">No expenses found for the selected year/month/date filters.</p>
-        ) : (
-          <>
-            <ul className="expense-list">
-              {paginatedRecentExpenses.map((expense) => (
-                <li key={expense.id} className="expense-item">
-                  <div>
-                    <p className="expense-title">{expense.description || expense.categoryName}</p>
-                    <p className="expense-meta">
-                      {expense.categoryName} • {expense.date}
-                    </p>
-                  </div>
-                  <div className="expense-actions">
-                    <strong>{currency.format(expense.amount)}</strong>
+          {expenses.length === 0 ? (
+            <p className="muted">No expenses yet for this user. Add your first one above.</p>
+          ) : isRecentRangeInvalid ? (
+            <p className="muted">Recent start date must be on or before end date.</p>
+          ) : filteredExpenses.length === 0 ? (
+            <p className="muted">No expenses found for the selected year/month/date filters.</p>
+          ) : (
+            <>
+              <ul className="expense-list">
+                {paginatedRecentExpenses.map((expense) => (
+                  <li key={expense.id} className="expense-item">
+                    <div>
+                      <p className="expense-title">{expense.description || expense.categoryName}</p>
+                      <p className="expense-meta">
+                        {expense.categoryName} • {expense.date}
+                      </p>
+                    </div>
+                    <div className="expense-actions">
+                      <strong>{currency.format(expense.amount)}</strong>
+                      <button
+                        type="button"
+                        className="danger-btn"
+                        onClick={() => onDeleteExpense(expense.id)}
+                        disabled={deletingExpenseId === expense.id}
+                      >
+                        {deletingExpenseId === expense.id ? 'Deleting...' : 'Delete'}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              {totalRecentPages > 1 ? (
+                <div className="recent-pagination">
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setRecentPage((page) => Math.max(1, page - 1))}
+                    disabled={recentPage === 1}
+                  >
+                    Previous
+                  </button>
+                  <p>
+                    Page {recentPage} of {totalRecentPages}
+                  </p>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setRecentPage((page) => Math.min(totalRecentPages, page + 1))}
+                    disabled={recentPage === totalRecentPages}
+                  >
+                    Next
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
+        </section>
+
+        <section
+          className={
+            mobileTab === 'friends'
+              ? 'panel glass mobile-panel-friends is-active'
+              : 'panel glass mobile-panel-friends'
+          }
+        >
+          <div className="panel-head friends-head">
+            <div>
+              <h3>Friends Comparison</h3>
+              <span>Compare spending and category behavior.</span>
+            </div>
+          </div>
+
+          <form className="friend-search-form" onSubmit={onSearchFriends}>
+            <input
+              value={friendSearchTerm}
+              onChange={(event) => setFriendSearchTerm(event.target.value)}
+              placeholder="Search username to add friend"
+            />
+            <button type="submit" className="secondary" disabled={searchingFriends}>
+              {searchingFriends ? 'Searching...' : 'Search'}
+            </button>
+          </form>
+
+          {friendSearchResults.length > 0 ? (
+            <ul className="friend-search-results">
+              {friendSearchResults.map((item) => {
+                const alreadyAdded = friendIdSet.has(item.id);
+
+                return (
+                  <li key={item.id}>
+                    <span>@{item.username}</span>
                     <button
                       type="button"
-                      className="danger-btn"
-                      onClick={() => onDeleteExpense(expense.id)}
-                      disabled={deletingExpenseId === expense.id}
+                      className="primary"
+                      disabled={alreadyAdded || addingFriendUsername === item.username}
+                      onClick={() => onAddFriend(item.username)}
                     >
-                      {deletingExpenseId === expense.id ? 'Deleting...' : 'Delete'}
+                      {alreadyAdded
+                        ? 'Added'
+                        : addingFriendUsername === item.username
+                          ? 'Adding...'
+                          : 'Add'}
                     </button>
-                  </div>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+
+          {friendOnlyInsights.length > 0 ? (
+            <div className="friend-chip-row">
+              {friendOnlyInsights.map((item) => (
+                <div key={item.user.id} className="friend-chip">
+                  <span>@{item.user.username}</span>
+                  <button
+                    type="button"
+                    className="danger-btn"
+                    onClick={() => onRemoveFriend(item.user.id)}
+                    disabled={removingFriendId === item.user.id}
+                  >
+                    {removingFriendId === item.user.id ? '...' : 'Remove'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">Add friends to compare spending patterns.</p>
+          )}
+
+          <div className="friend-section">
+            <h4>Spend Comparison</h4>
+            <div className="chart-box friend-chart-box">
+              {friendComparisonData.length <= 1 ? (
+                <p className="muted">Add at least one friend to see comparison charts.</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={240}>
+                  <BarChart data={friendComparisonData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
+                    <XAxis dataKey="name" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                    <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                    <Tooltip formatter={(value: number) => currency.format(value)} />
+                    <Bar dataKey="amount" fill="#22C55E" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+          </div>
+
+          <div className="friend-section">
+            <h4>Top Category Per Person</h4>
+            <ul className="friend-top-list">
+              {friendInsights.map((item) => (
+                <li key={item.user.id}>
+                  <p>{item.isCurrentUser ? `${item.user.username} (You)` : item.user.username}</p>
+                  <p>
+                    {item.topCategory
+                      ? `${item.topCategory.name} • ${currency.format(item.topCategory.amount)}`
+                      : 'No spending yet'}
+                  </p>
                 </li>
               ))}
             </ul>
-            {totalRecentPages > 1 ? (
-              <div className="recent-pagination">
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => setRecentPage((page) => Math.max(1, page - 1))}
-                  disabled={recentPage === 1}
-                >
-                  Previous
-                </button>
-                <p>
-                  Page {recentPage} of {totalRecentPages}
-                </p>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => setRecentPage((page) => Math.min(totalRecentPages, page + 1))}
-                  disabled={recentPage === totalRecentPages}
-                >
-                  Next
-                </button>
+          </div>
+
+          <div className="friend-section">
+            <h4>Recent Friend Expenses</h4>
+            {friendOnlyInsights.length === 0 ? (
+              <p className="muted">No friends added yet.</p>
+            ) : (
+              <div className="friend-recents-grid">
+                {friendOnlyInsights.map((item) => (
+                  <article key={item.user.id} className="friend-recent-card">
+                    <h5>@{item.user.username}</h5>
+                    {item.recentExpenses.length === 0 ? (
+                      <p className="muted">No expenses yet.</p>
+                    ) : (
+                      <ul>
+                        {item.recentExpenses.map((expense) => (
+                          <li key={expense.id}>
+                            <span>{expense.description || expense.categoryName}</span>
+                            <strong>{currency.format(expense.amount)}</strong>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </article>
+                ))}
               </div>
-            ) : null}
-          </>
-        )}
+            )}
+          </div>
         </section>
       </div>
     </main>
