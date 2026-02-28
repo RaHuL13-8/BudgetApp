@@ -11,9 +11,16 @@ export type Expense = {
   description: string;
   categoryId: string;
   categoryName: string;
+  subcategoryName: string;
   amount: number;
   date: string;
   createdAt: string;
+};
+
+export type Subcategory = {
+  id: string;
+  name: string;
+  nameLower: string;
 };
 
 export type TrendPoint = {
@@ -59,6 +66,7 @@ export type CreateExpensePayload = {
   categoryId: string;
   date: string;
   description?: string;
+  subcategoryName: string;
 };
 
 export type CreateCategoryPayload = {

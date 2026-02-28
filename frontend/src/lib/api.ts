@@ -27,6 +27,7 @@ import type {
   CreateExpensePayload,
   Expense,
   FriendInsight,
+  Subcategory,
   UserProfile,
   UserSearchResult
 } from './types';
@@ -48,6 +49,22 @@ const PREDEFINED_CATEGORIES: Array<{ id: string; name: string; color: string }> 
 
 function normalizeUsername(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function normalizeKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function normalizeLabel(value: string): string {
+  return value.trim().replace(/\s+/g, ' ');
+}
+
+function normalizeLabelLower(value: string): string {
+  return normalizeLabel(value).toLowerCase();
 }
 
 function validateUsername(value: string): string {
@@ -86,6 +103,19 @@ function categoriesCollection(userId: string) {
 
 function expensesCollection(userId: string) {
   return collection(getDb(), 'users', userId, 'expenses');
+}
+
+function globalCategorySubcategoryRootCollection() {
+  return collection(getDb(), 'globalCategorySubcategories');
+}
+
+function subcategoriesCollectionForCategoryName(categoryName: string) {
+  return collection(
+    getDb(),
+    'globalCategorySubcategories',
+    normalizeKey(categoryName),
+    'items'
+  );
 }
 
 function mapUserProfile(userId: string, data: Record<string, unknown>): UserProfile {
@@ -296,6 +326,74 @@ export async function createCategory(userId: string, payload: CreateCategoryPayl
   };
 }
 
+export async function fetchGlobalSubcategories(categoryName: string): Promise<Subcategory[]> {
+  const trimmedCategory = normalizeLabel(categoryName);
+  if (!trimmedCategory) {
+    return [];
+  }
+
+  const snapshot = await getDocs(
+    query(subcategoriesCollectionForCategoryName(trimmedCategory), orderBy('nameLower'))
+  );
+
+  return snapshot.docs.map((item) => {
+    const data = item.data();
+    const name = typeof data.name === 'string' ? data.name : item.id;
+    return {
+      id: item.id,
+      name,
+      nameLower: typeof data.nameLower === 'string' ? data.nameLower : normalizeLabelLower(name)
+    } satisfies Subcategory;
+  });
+}
+
+async function ensureGlobalSubcategory(
+  categoryName: string,
+  subcategoryNameInput: string,
+  createdByUserId: string
+): Promise<string> {
+  const categoryLabel = normalizeLabel(categoryName);
+  const subcategoryLabel = normalizeLabel(subcategoryNameInput);
+
+  if (!categoryLabel || !subcategoryLabel) {
+    return '';
+  }
+
+  const subcategoryKey = normalizeKey(subcategoryLabel);
+  if (!subcategoryKey) {
+    return '';
+  }
+
+  const rootRef = doc(globalCategorySubcategoryRootCollection(), normalizeKey(categoryLabel));
+  const subcategoryRef = doc(subcategoriesCollectionForCategoryName(categoryLabel), subcategoryKey);
+
+  await Promise.all([
+    setDoc(
+      rootRef,
+      {
+        categoryName: categoryLabel,
+        categoryNameLower: normalizeLabelLower(categoryLabel),
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    ),
+    setDoc(
+      subcategoryRef,
+      {
+        name: subcategoryLabel,
+        nameLower: normalizeLabelLower(subcategoryLabel),
+        categoryName: categoryLabel,
+        categoryNameLower: normalizeLabelLower(categoryLabel),
+        createdBy: createdByUserId,
+        createdAt: serverTimestamp()
+      },
+      { merge: true }
+    )
+  ]);
+
+  return subcategoryLabel;
+}
+
 function mapExpense(expenseId: string, data: Record<string, unknown>): Expense {
   return {
     id: expenseId,
@@ -303,6 +401,7 @@ function mapExpense(expenseId: string, data: Record<string, unknown>): Expense {
     description: typeof data.description === 'string' ? data.description : '',
     categoryId: typeof data.categoryId === 'string' ? data.categoryId : '',
     categoryName: typeof data.categoryName === 'string' ? data.categoryName : 'Uncategorized',
+    subcategoryName: typeof data.subcategoryName === 'string' ? normalizeLabel(data.subcategoryName) : '',
     amount: typeof data.amount === 'number' ? data.amount : Number(data.amount ?? 0),
     date: typeof data.date === 'string' ? data.date : new Date().toISOString().slice(0, 10),
     createdAt: toIso(data.createdAt)
@@ -327,6 +426,11 @@ export async function createExpense(userId: string, payload: CreateExpensePayloa
     throw new Error('Category is required.');
   }
 
+  const requestedSubcategoryName = normalizeLabel(payload.subcategoryName ?? '');
+  if (!requestedSubcategoryName) {
+    throw new Error('Subcategory is required.');
+  }
+
   const categorySnapshot = await getDoc(doc(categoriesCollection(userId), payload.categoryId));
 
   if (!categorySnapshot.exists()) {
@@ -335,12 +439,18 @@ export async function createExpense(userId: string, payload: CreateExpensePayloa
 
   const categoryData = categorySnapshot.data();
   const categoryName = typeof categoryData.name === 'string' ? categoryData.name : 'Uncategorized';
+  const subcategoryName = await ensureGlobalSubcategory(
+    categoryName,
+    requestedSubcategoryName,
+    userId
+  );
 
   const expenseRef = await addDoc(expensesCollection(userId), {
     userId,
     amount,
     categoryId: payload.categoryId,
     categoryName,
+    subcategoryName,
     date: payload.date,
     description: payload.description?.trim() ?? '',
     createdAt: serverTimestamp()

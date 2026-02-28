@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, TouchEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -23,11 +23,12 @@ import {
   fetchCategories,
   fetchExpenses,
   fetchFriendInsights,
+  fetchGlobalSubcategories,
   getUserByUsername,
   removeFriend,
   searchUsers
 } from './lib/api';
-import type { Category, Expense, FriendInsight, UserSearchResult } from './lib/types';
+import type { Category, Expense, FriendInsight, Subcategory, UserSearchResult } from './lib/types';
 
 const currency = new Intl.NumberFormat('en-IN', {
   style: 'currency',
@@ -41,6 +42,7 @@ const FRIEND_SERIES_COLORS = ['#22C55E', '#38BDF8', '#F59E0B', '#A78BFA', '#FB71
 
 type MobileTab = 'add' | 'trends' | 'recent' | 'friends';
 type FriendPreset = 'all' | 'month' | 'quarter' | 'ytd' | 'custom';
+const MOBILE_TAB_ORDER: MobileTab[] = ['add', 'trends', 'recent', 'friends'];
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
@@ -55,6 +57,26 @@ function monthName(monthCode: string): string {
 function parseIsoDate(value: string): Date {
   const [year, month, day] = value.split('-').map(Number);
   return new Date(year, month - 1, day);
+}
+
+function normalizeSubcategory(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function withHexAlpha(color: string, alpha: string): string {
+  const normalized = color.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(normalized)) {
+    return `${normalized}${alpha}`;
+  }
+  return normalized;
+}
+
+function subcategoryColor(name: string): string {
+  let hash = 0;
+  for (let index = 0; index < name.length; index += 1) {
+    hash = (hash * 31 + name.charCodeAt(index)) % 360;
+  }
+  return `hsl(${hash} 72% 52%)`;
 }
 
 function rangeWindowStart(range: 'daily' | 'monthly' | 'yearly', endDate: Date): Date {
@@ -102,6 +124,7 @@ function buildTrendData(
   expenses: Expense[],
   range: 'daily' | 'monthly' | 'yearly',
   selectedCategoryId: string,
+  selectedSubcategory: string,
   startDate: string,
   endDate: string
 ): Array<{ label: string; amount: number }> {
@@ -112,10 +135,13 @@ function buildTrendData(
   const dayFmt = new Intl.DateTimeFormat('en-US', { month: 'short', day: '2-digit' });
   const monthFmt = new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit' });
 
-  const filteredExpenses =
-    selectedCategoryId === 'all'
-      ? expenses
-      : expenses.filter((expense) => expense.categoryId === selectedCategoryId);
+  const filteredExpenses = expenses.filter((expense) => {
+    const categoryMatch = selectedCategoryId === 'all' || expense.categoryId === selectedCategoryId;
+    const subcategoryMatch =
+      selectedSubcategory === 'all' ||
+      normalizeSubcategory(expense.subcategoryName) === selectedSubcategory;
+    return categoryMatch && subcategoryMatch;
+  });
 
   const normalizedEnd = endDate
     ? parseIsoDate(endDate)
@@ -204,6 +230,8 @@ export default function App() {
 
   const [range, setRange] = useState<'daily' | 'monthly' | 'yearly'>('monthly');
   const [trendCategoryId, setTrendCategoryId] = useState('all');
+  const [trendSubcategory, setTrendSubcategory] = useState('all');
+  const [trendSubcategoryOptions, setTrendSubcategoryOptions] = useState<Subcategory[]>([]);
   const [mobileTab, setMobileTab] = useState<MobileTab>('add');
   const [mobileTrendView, setMobileTrendView] = useState<'trend' | 'split'>('trend');
   const [recentPage, setRecentPage] = useState(1);
@@ -219,6 +247,8 @@ export default function App() {
 
   const [amount, setAmount] = useState('');
   const [categoryId, setCategoryId] = useState('');
+  const [subcategoryName, setSubcategoryName] = useState('');
+  const [subcategoryOptions, setSubcategoryOptions] = useState<Subcategory[]>([]);
   const [expenseDate, setExpenseDate] = useState(todayISO());
   const [description, setDescription] = useState('');
 
@@ -228,6 +258,9 @@ export default function App() {
 
   const [selectedExpenseYear, setSelectedExpenseYear] = useState('all');
   const [selectedExpenseMonth, setSelectedExpenseMonth] = useState('all');
+  const [selectedExpenseCategoryId, setSelectedExpenseCategoryId] = useState('all');
+  const [selectedExpenseSubcategory, setSelectedExpenseSubcategory] = useState('all');
+  const [recentSubcategoryOptions, setRecentSubcategoryOptions] = useState<Subcategory[]>([]);
   const [recentStartDate, setRecentStartDate] = useState('');
   const [recentEndDate, setRecentEndDate] = useState('');
   const [trendStartDate, setTrendStartDate] = useState('');
@@ -238,6 +271,8 @@ export default function App() {
   const [friendFilterPreset, setFriendFilterPreset] = useState<FriendPreset>('all');
   const [friendFilterYear, setFriendFilterYear] = useState('all');
   const [friendFilterMonth, setFriendFilterMonth] = useState('all');
+  const [friendFilterCategoryName, setFriendFilterCategoryName] = useState('all');
+  const [friendFilterSubcategory, setFriendFilterSubcategory] = useState('all');
   const [friendFilterStartDate, setFriendFilterStartDate] = useState('');
   const [friendFilterEndDate, setFriendFilterEndDate] = useState('');
   const [includeMeInFriendComparison, setIncludeMeInFriendComparison] = useState(true);
@@ -250,6 +285,7 @@ export default function App() {
   const [removingFriendId, setRemovingFriendId] = useState('');
   const [deletingExpenseId, setDeletingExpenseId] = useState('');
   const [error, setError] = useState('');
+  const mobileTouchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -296,16 +332,25 @@ export default function App() {
     setDraftSwitchUsername(userId);
     setSelectedExpenseYear('all');
     setSelectedExpenseMonth('all');
+    setSelectedExpenseCategoryId('all');
+    setSelectedExpenseSubcategory('all');
     setRecentStartDate('');
     setRecentEndDate('');
     setTrendStartDate('');
     setTrendEndDate('');
     setTrendCategoryId('all');
+    setTrendSubcategory('all');
+    setTrendSubcategoryOptions([]);
+    setSubcategoryName('');
+    setSubcategoryOptions([]);
+    setRecentSubcategoryOptions([]);
     setFriendSearchTerm('');
     setFriendSearchResults([]);
     setFriendFilterPreset('all');
     setFriendFilterYear('all');
     setFriendFilterMonth('all');
+    setFriendFilterCategoryName('all');
+    setFriendFilterSubcategory('all');
     setFriendFilterStartDate('');
     setFriendFilterEndDate('');
     setIncludeMeInFriendComparison(true);
@@ -373,8 +418,16 @@ export default function App() {
     if (isTrendRangeInvalid) {
       return [];
     }
-    return buildTrendData(expenses, range, trendCategoryId, trendStartDate, trendEndDate);
-  }, [expenses, range, trendCategoryId, trendStartDate, trendEndDate, isTrendRangeInvalid]);
+    return buildTrendData(expenses, range, trendCategoryId, trendSubcategory, trendStartDate, trendEndDate);
+  }, [
+    expenses,
+    range,
+    trendCategoryId,
+    trendSubcategory,
+    trendStartDate,
+    trendEndDate,
+    isTrendRangeInvalid
+  ]);
 
   const selectedTrendCategoryName = useMemo(() => {
     if (trendCategoryId === 'all') {
@@ -384,14 +437,71 @@ export default function App() {
     return categories.find((category) => category.id === trendCategoryId)?.name ?? 'All categories';
   }, [categories, trendCategoryId]);
 
+  const selectedTrendSubcategoryName = useMemo(() => {
+    if (trendSubcategory === 'all') {
+      return 'All subcategories';
+    }
+    return (
+      trendSubcategoryOptions.find((item) => item.nameLower === trendSubcategory)?.name ??
+      trendSubcategory
+    );
+  }, [trendSubcategory, trendSubcategoryOptions]);
+
+  const categoryNameById = useMemo(
+    () => new Map(categories.map((category) => [category.id, category.name])),
+    [categories]
+  );
+
   const quickCategories = useMemo(() => {
     const categoryById = new Map(categories.map((category) => [category.id, category]));
+    const categoryUsage = new Map<string, number>();
+
+    for (const expense of expenses) {
+      categoryUsage.set(expense.categoryId, (categoryUsage.get(expense.categoryId) ?? 0) + 1);
+    }
+
+    const byUsageThenName = (left: Category, right: Category) => {
+      const usageDiff = (categoryUsage.get(right.id) ?? 0) - (categoryUsage.get(left.id) ?? 0);
+      if (usageDiff !== 0) {
+        return usageDiff;
+      }
+      return left.name.localeCompare(right.name);
+    };
+
     const selected = quickCategoryIds
       .map((categoryIdValue) => categoryById.get(categoryIdValue))
       .filter((category): category is Category => Boolean(category));
 
-    return selected.length > 0 ? selected : categories.slice(0, 8);
-  }, [categories, quickCategoryIds]);
+    return selected.length > 0
+      ? [...selected].sort(byUsageThenName)
+      : [...categories].sort(byUsageThenName).slice(0, 8);
+  }, [categories, expenses, quickCategoryIds]);
+
+  const sortedSubcategoryOptions = useMemo(() => {
+    const subcategoryUsage = new Map<string, number>();
+
+    for (const expense of expenses) {
+      if (expense.categoryId !== categoryId) {
+        continue;
+      }
+
+      const nameLower = normalizeSubcategory(expense.subcategoryName);
+      if (!nameLower) {
+        continue;
+      }
+
+      subcategoryUsage.set(nameLower, (subcategoryUsage.get(nameLower) ?? 0) + 1);
+    }
+
+    return [...subcategoryOptions].sort((left, right) => {
+      const usageDiff =
+        (subcategoryUsage.get(right.nameLower) ?? 0) - (subcategoryUsage.get(left.nameLower) ?? 0);
+      if (usageDiff !== 0) {
+        return usageDiff;
+      }
+      return left.name.localeCompare(right.name);
+    });
+  }, [expenses, categoryId, subcategoryOptions]);
 
   const expenseYears = useMemo(() => {
     const years = new Set(expenses.map((expense) => expense.date.slice(0, 4)));
@@ -408,17 +518,47 @@ export default function App() {
     return Array.from(months).sort((a, b) => a.localeCompare(b));
   }, [expenses, selectedExpenseYear]);
 
+  const knownSubcategoryOptionsFromExpenses = useMemo(() => {
+    const uniques = new Map<string, string>();
+    for (const expense of expenses) {
+      const name = expense.subcategoryName.trim();
+      if (!name) {
+        continue;
+      }
+      const key = normalizeSubcategory(name);
+      if (!uniques.has(key)) {
+        uniques.set(key, name);
+      }
+    }
+    return Array.from(uniques.entries())
+      .map(([nameLower, name]) => ({ id: nameLower, name, nameLower }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [expenses]);
+
   const filteredExpenses = useMemo(() => {
     return expenses.filter((expense) => {
       const year = expense.date.slice(0, 4);
       const month = expense.date.slice(5, 7);
       const yearMatch = selectedExpenseYear === 'all' || year === selectedExpenseYear;
       const monthMatch = selectedExpenseMonth === 'all' || month === selectedExpenseMonth;
+      const categoryMatch =
+        selectedExpenseCategoryId === 'all' || expense.categoryId === selectedExpenseCategoryId;
+      const subcategoryMatch =
+        selectedExpenseSubcategory === 'all' ||
+        normalizeSubcategory(expense.subcategoryName) === selectedExpenseSubcategory;
       const startMatch = !recentStartDate || expense.date >= recentStartDate;
       const endMatch = !recentEndDate || expense.date <= recentEndDate;
-      return yearMatch && monthMatch && startMatch && endMatch;
+      return yearMatch && monthMatch && categoryMatch && subcategoryMatch && startMatch && endMatch;
     });
-  }, [expenses, selectedExpenseYear, selectedExpenseMonth, recentStartDate, recentEndDate]);
+  }, [
+    expenses,
+    selectedExpenseYear,
+    selectedExpenseMonth,
+    selectedExpenseCategoryId,
+    selectedExpenseSubcategory,
+    recentStartDate,
+    recentEndDate
+  ]);
 
   const isRecentRangeInvalid = Boolean(recentStartDate && recentEndDate && recentStartDate > recentEndDate);
   const recentPageSize = 4;
@@ -456,6 +596,31 @@ export default function App() {
     return Array.from(months).sort((a, b) => a.localeCompare(b));
   }, [friendAllExpenses, friendFilterYear]);
 
+  const friendFilterCategories = useMemo(() => {
+    const categoriesSet = new Set(friendAllExpenses.map((expense) => expense.categoryName).filter(Boolean));
+    return Array.from(categoriesSet).sort((a, b) => a.localeCompare(b));
+  }, [friendAllExpenses]);
+
+  const friendFilterSubcategories = useMemo(() => {
+    const uniques = new Map<string, string>();
+    for (const expense of friendAllExpenses) {
+      if (friendFilterCategoryName !== 'all' && expense.categoryName !== friendFilterCategoryName) {
+        continue;
+      }
+      const subcategory = expense.subcategoryName.trim();
+      if (!subcategory) {
+        continue;
+      }
+      const key = normalizeSubcategory(subcategory);
+      if (!uniques.has(key)) {
+        uniques.set(key, subcategory);
+      }
+    }
+    return Array.from(uniques.entries())
+      .map(([nameLower, name]) => ({ nameLower, name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [friendAllExpenses, friendFilterCategoryName]);
+
   const isFriendRangeInvalid = Boolean(
     friendFilterStartDate && friendFilterEndDate && friendFilterStartDate > friendFilterEndDate
   );
@@ -471,9 +636,14 @@ export default function App() {
         const month = expense.date.slice(5, 7);
         const yearMatch = friendFilterYear === 'all' || year === friendFilterYear;
         const monthMatch = friendFilterMonth === 'all' || month === friendFilterMonth;
+        const categoryMatch =
+          friendFilterCategoryName === 'all' || expense.categoryName === friendFilterCategoryName;
+        const subcategoryMatch =
+          friendFilterSubcategory === 'all' ||
+          normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
         const startMatch = !friendFilterStartDate || expense.date >= friendFilterStartDate;
         const endMatch = !friendFilterEndDate || expense.date <= friendFilterEndDate;
-        return yearMatch && monthMatch && startMatch && endMatch;
+        return yearMatch && monthMatch && categoryMatch && subcategoryMatch && startMatch && endMatch;
       });
 
       return {
@@ -488,6 +658,8 @@ export default function App() {
     friendInsights,
     friendFilterYear,
     friendFilterMonth,
+    friendFilterCategoryName,
+    friendFilterSubcategory,
     friendFilterStartDate,
     friendFilterEndDate,
     isFriendRangeInvalid
@@ -591,6 +763,15 @@ export default function App() {
     if (friendFilterMonth !== 'all') {
       segments.push(monthName(friendFilterMonth));
     }
+    if (friendFilterCategoryName !== 'all') {
+      segments.push(friendFilterCategoryName);
+    }
+    if (friendFilterSubcategory !== 'all') {
+      const subcategoryLabel =
+        friendFilterSubcategories.find((item) => item.nameLower === friendFilterSubcategory)?.name ??
+        friendFilterSubcategory;
+      segments.push(subcategoryLabel);
+    }
     if (friendFilterStartDate || friendFilterEndDate) {
       segments.push(`${friendFilterStartDate || '...'} to ${friendFilterEndDate || '...'}`);
     }
@@ -600,6 +781,9 @@ export default function App() {
     friendFilterPreset,
     friendFilterYear,
     friendFilterMonth,
+    friendFilterCategoryName,
+    friendFilterSubcategory,
+    friendFilterSubcategories,
     friendFilterStartDate,
     friendFilterEndDate,
     includeMeInFriendComparison
@@ -616,6 +800,12 @@ export default function App() {
       setSelectedExpenseMonth('all');
     }
   }, [expenseMonths, selectedExpenseMonth]);
+
+  useEffect(() => {
+    if (selectedExpenseCategoryId !== 'all' && !categories.some((category) => category.id === selectedExpenseCategoryId)) {
+      setSelectedExpenseCategoryId('all');
+    }
+  }, [categories, selectedExpenseCategoryId]);
 
   useEffect(() => {
     if (friendFilterYear !== 'all' && !friendExpenseYears.includes(friendFilterYear)) {
@@ -636,6 +826,24 @@ export default function App() {
   }, [categories, trendCategoryId]);
 
   useEffect(() => {
+    if (
+      friendFilterCategoryName !== 'all' &&
+      !friendFilterCategories.includes(friendFilterCategoryName)
+    ) {
+      setFriendFilterCategoryName('all');
+    }
+  }, [friendFilterCategories, friendFilterCategoryName]);
+
+  useEffect(() => {
+    if (
+      friendFilterSubcategory !== 'all' &&
+      !friendFilterSubcategories.some((item) => item.nameLower === friendFilterSubcategory)
+    ) {
+      setFriendFilterSubcategory('all');
+    }
+  }, [friendFilterSubcategories, friendFilterSubcategory]);
+
+  useEffect(() => {
     setQuickCategoryIds((previous) => {
       const filtered = previous.filter((id) => categories.some((category) => category.id === id));
       return filtered.length === previous.length ? previous : filtered;
@@ -643,12 +851,129 @@ export default function App() {
   }, [categories]);
 
   useEffect(() => {
+    let cancelled = false;
+    const selectedCategoryName = categoryNameById.get(categoryId) ?? '';
+
+    setSubcategoryName('');
+    if (!selectedCategoryName) {
+      setSubcategoryOptions([]);
+      return undefined;
+    }
+
+    void fetchGlobalSubcategories(selectedCategoryName)
+      .then((items) => {
+        if (!cancelled) {
+          setSubcategoryOptions(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSubcategoryOptions([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [categoryId, categoryNameById]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadTrendSubcategories = async () => {
+      if (trendCategoryId === 'all') {
+        setTrendSubcategoryOptions(knownSubcategoryOptionsFromExpenses);
+        return;
+      }
+
+      const categoryName = categoryNameById.get(trendCategoryId) ?? '';
+      if (!categoryName) {
+        setTrendSubcategoryOptions([]);
+        return;
+      }
+
+      try {
+        const items = await fetchGlobalSubcategories(categoryName);
+        if (!cancelled) {
+          setTrendSubcategoryOptions(items);
+        }
+      } catch {
+        if (!cancelled) {
+          setTrendSubcategoryOptions([]);
+        }
+      }
+    };
+
+    void loadTrendSubcategories();
+    return () => {
+      cancelled = true;
+    };
+  }, [trendCategoryId, categoryNameById, knownSubcategoryOptionsFromExpenses]);
+
+  useEffect(() => {
+    if (
+      trendSubcategory !== 'all' &&
+      !trendSubcategoryOptions.some((item) => item.nameLower === trendSubcategory)
+    ) {
+      setTrendSubcategory('all');
+    }
+  }, [trendSubcategory, trendSubcategoryOptions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadRecentSubcategories = async () => {
+      if (selectedExpenseCategoryId === 'all') {
+        setRecentSubcategoryOptions(knownSubcategoryOptionsFromExpenses);
+        return;
+      }
+
+      const categoryName = categoryNameById.get(selectedExpenseCategoryId) ?? '';
+      if (!categoryName) {
+        setRecentSubcategoryOptions([]);
+        return;
+      }
+
+      try {
+        const items = await fetchGlobalSubcategories(categoryName);
+        if (!cancelled) {
+          setRecentSubcategoryOptions(items);
+        }
+      } catch {
+        if (!cancelled) {
+          setRecentSubcategoryOptions([]);
+        }
+      }
+    };
+
+    void loadRecentSubcategories();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedExpenseCategoryId, categoryNameById, knownSubcategoryOptionsFromExpenses]);
+
+  useEffect(() => {
+    if (
+      selectedExpenseSubcategory !== 'all' &&
+      !recentSubcategoryOptions.some((item) => item.nameLower === selectedExpenseSubcategory)
+    ) {
+      setSelectedExpenseSubcategory('all');
+    }
+  }, [selectedExpenseSubcategory, recentSubcategoryOptions]);
+
+  useEffect(() => {
     setMobileTrendView('trend');
-  }, [range, trendCategoryId, trendStartDate, trendEndDate]);
+  }, [range, trendCategoryId, trendSubcategory, trendStartDate, trendEndDate]);
 
   useEffect(() => {
     setRecentPage(1);
-  }, [filteredExpenses.length, selectedExpenseYear, selectedExpenseMonth, recentStartDate, recentEndDate]);
+  }, [
+    filteredExpenses.length,
+    selectedExpenseYear,
+    selectedExpenseMonth,
+    selectedExpenseCategoryId,
+    selectedExpenseSubcategory,
+    recentStartDate,
+    recentEndDate
+  ]);
 
   useEffect(() => {
     if (recentPage > totalRecentPages) {
@@ -721,7 +1046,7 @@ export default function App() {
     event.preventDefault();
     const parsedAmount = Number(amount);
 
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || !categoryId) {
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0 || !categoryId || !subcategoryName.trim()) {
       return;
     }
 
@@ -733,11 +1058,13 @@ export default function App() {
         amount: parsedAmount,
         categoryId,
         date: expenseDate,
-        description: description.trim()
+        description: description.trim(),
+        subcategoryName: subcategoryName.trim()
       });
 
       setAmount('');
       setDescription('');
+      setSubcategoryName('');
       await loadData();
     } catch (requestError) {
       setError(readErrorMessage(requestError, 'Failed to add expense.'));
@@ -908,6 +1235,57 @@ export default function App() {
     setFriendFilterEndDate(today);
   }
 
+  const onMobileTouchStart = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    if (window.innerWidth > 1024 || event.touches.length !== 1) {
+      mobileTouchStartRef.current = null;
+      return;
+    }
+
+    const touch = event.touches[0];
+    mobileTouchStartRef.current = { x: touch.clientX, y: touch.clientY };
+  }, []);
+
+  const onMobileTouchEnd = useCallback((event: TouchEvent<HTMLDivElement>) => {
+    if (window.innerWidth > 1024 || event.changedTouches.length !== 1) {
+      mobileTouchStartRef.current = null;
+      return;
+    }
+
+    const start = mobileTouchStartRef.current;
+    mobileTouchStartRef.current = null;
+
+    if (!start) {
+      return;
+    }
+
+    const touch = event.changedTouches[0];
+    const deltaX = touch.clientX - start.x;
+    const deltaY = touch.clientY - start.y;
+    const absX = Math.abs(deltaX);
+    const absY = Math.abs(deltaY);
+
+    if (absX < 56 || absX <= absY * 1.25 || absY > 120) {
+      return;
+    }
+
+    setMobileTab((current) => {
+      const currentIndex = MOBILE_TAB_ORDER.indexOf(current);
+      if (currentIndex < 0) {
+        return current;
+      }
+
+      if (deltaX < 0 && currentIndex < MOBILE_TAB_ORDER.length - 1) {
+        return MOBILE_TAB_ORDER[currentIndex + 1];
+      }
+
+      if (deltaX > 0 && currentIndex > 0) {
+        return MOBILE_TAB_ORDER[currentIndex - 1];
+      }
+
+      return current;
+    });
+  }, []);
+
   return (
     <main className="page-shell">
       <div className="bg-orb bg-orb-top" />
@@ -1059,12 +1437,28 @@ export default function App() {
               <select
                 id="trendCategory"
                 value={trendCategoryId}
-                onChange={(event) => setTrendCategoryId(event.target.value)}
+                onChange={(event) => {
+                  setTrendCategoryId(event.target.value);
+                  setTrendSubcategory('all');
+                }}
               >
                 <option value="all">All categories</option>
                 {categories.map((category) => (
                   <option key={category.id} value={category.id}>
                     {category.name}
+                  </option>
+                ))}
+              </select>
+              <label htmlFor="trendSubcategory">Subcategory</label>
+              <select
+                id="trendSubcategory"
+                value={trendSubcategory}
+                onChange={(event) => setTrendSubcategory(event.target.value)}
+              >
+                <option value="all">All subcategories</option>
+                {trendSubcategoryOptions.map((subcategory) => (
+                  <option key={subcategory.nameLower} value={subcategory.nameLower}>
+                    {subcategory.name}
                   </option>
                 ))}
               </select>
@@ -1090,6 +1484,7 @@ export default function App() {
                 onClick={() => {
                   setRange('monthly');
                   setTrendCategoryId('all');
+                  setTrendSubcategory('all');
                   setTrendStartDate('');
                   setTrendEndDate('');
                 }}
@@ -1135,6 +1530,35 @@ export default function App() {
                   </option>
                 ))}
               </select>
+              <label htmlFor="expenseCategoryFilter">Category</label>
+              <select
+                id="expenseCategoryFilter"
+                value={selectedExpenseCategoryId}
+                onChange={(event) => {
+                  setSelectedExpenseCategoryId(event.target.value);
+                  setSelectedExpenseSubcategory('all');
+                }}
+              >
+                <option value="all">All categories</option>
+                {categories.map((category) => (
+                  <option key={category.id} value={category.id}>
+                    {category.name}
+                  </option>
+                ))}
+              </select>
+              <label htmlFor="expenseSubcategoryFilter">Subcategory</label>
+              <select
+                id="expenseSubcategoryFilter"
+                value={selectedExpenseSubcategory}
+                onChange={(event) => setSelectedExpenseSubcategory(event.target.value)}
+              >
+                <option value="all">All subcategories</option>
+                {recentSubcategoryOptions.map((subcategory) => (
+                  <option key={subcategory.nameLower} value={subcategory.nameLower}>
+                    {subcategory.name}
+                  </option>
+                ))}
+              </select>
               <label htmlFor="recentStartDate">Start Date</label>
               <input
                 id="recentStartDate"
@@ -1157,6 +1581,8 @@ export default function App() {
                 onClick={() => {
                   setSelectedExpenseYear('all');
                   setSelectedExpenseMonth('all');
+                  setSelectedExpenseCategoryId('all');
+                  setSelectedExpenseSubcategory('all');
                   setRecentStartDate('');
                   setRecentEndDate('');
                 }}
@@ -1240,6 +1666,37 @@ export default function App() {
                 ))}
               </select>
 
+              <label htmlFor="friendCategoryFilter">Category</label>
+              <select
+                id="friendCategoryFilter"
+                value={friendFilterCategoryName}
+                onChange={(event) => {
+                  setFriendFilterCategoryName(event.target.value);
+                  setFriendFilterSubcategory('all');
+                }}
+              >
+                <option value="all">All categories</option>
+                {friendFilterCategories.map((categoryName) => (
+                  <option key={categoryName} value={categoryName}>
+                    {categoryName}
+                  </option>
+                ))}
+              </select>
+
+              <label htmlFor="friendSubcategoryFilter">Subcategory</label>
+              <select
+                id="friendSubcategoryFilter"
+                value={friendFilterSubcategory}
+                onChange={(event) => setFriendFilterSubcategory(event.target.value)}
+              >
+                <option value="all">All subcategories</option>
+                {friendFilterSubcategories.map((subcategory) => (
+                  <option key={subcategory.nameLower} value={subcategory.nameLower}>
+                    {subcategory.name}
+                  </option>
+                ))}
+              </select>
+
               <label htmlFor="friendStartDate">Start Date</label>
               <input
                 id="friendStartDate"
@@ -1284,6 +1741,8 @@ export default function App() {
                   setFriendFilterPreset('all');
                   setFriendFilterYear('all');
                   setFriendFilterMonth('all');
+                  setFriendFilterCategoryName('all');
+                  setFriendFilterSubcategory('all');
                   setFriendFilterStartDate('');
                   setFriendFilterEndDate('');
                   setIncludeMeInFriendComparison(true);
@@ -1425,7 +1884,7 @@ export default function App() {
         </button>
       </nav>
 
-      <div className="mobile-main">
+      <div className="mobile-main" onTouchStart={onMobileTouchStart} onTouchEnd={onMobileTouchEnd}>
         <section className="content-grid">
           <article
             className={mobileTab === 'add' ? 'panel glass mobile-panel-add is-active' : 'panel glass mobile-panel-add'}
@@ -1471,18 +1930,26 @@ export default function App() {
               </label>
 
               <div className="chips-row">
-                <div className="chips">
-                  {quickCategories.map((category) => (
-                    <button
-                      type="button"
-                      className={category.id === categoryId ? 'chip active' : 'chip'}
-                      key={category.id}
-                      style={{ borderColor: category.color }}
-                      onClick={() => setCategoryId(category.id)}
-                    >
-                      {category.name}
-                    </button>
-                  ))}
+                <div className="category-scroll-wrap">
+                  <div className="chips">
+                    {quickCategories.map((category) => {
+                      const selected = category.id === categoryId;
+                      return (
+                        <button
+                          type="button"
+                          className={selected ? 'chip active' : 'chip'}
+                          key={category.id}
+                          style={{
+                            borderColor: category.color,
+                            backgroundColor: withHexAlpha(category.color, selected ? '40' : '22')
+                          }}
+                          onClick={() => setCategoryId(category.id)}
+                        >
+                          {category.name}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -1494,6 +1961,42 @@ export default function App() {
                   ✎
                 </button>
               </div>
+
+              <label>
+                Subcategory
+                <input
+                  value={subcategoryName}
+                  required
+                  maxLength={40}
+                  onChange={(event) => setSubcategoryName(event.target.value)}
+                  placeholder="e.g. Zomato"
+                />
+              </label>
+
+              {subcategoryOptions.length > 0 ? (
+                <div className="subcategory-scroll-wrap">
+                  <div className="subcategory-chips">
+                    {sortedSubcategoryOptions.map((subcategory) => {
+                      const selected = normalizeSubcategory(subcategoryName) === subcategory.nameLower;
+                      const color = subcategoryColor(subcategory.nameLower);
+                      return (
+                        <button
+                          key={subcategory.id}
+                          type="button"
+                          className={selected ? 'chip subcategory-chip active' : 'chip subcategory-chip'}
+                          style={{
+                            borderColor: color,
+                            backgroundColor: color.replace(')', selected ? ' / 0.32)' : ' / 0.18)')
+                          }}
+                          onClick={() => setSubcategoryName(subcategory.name)}
+                        >
+                          {subcategory.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
 
               <label>
                 Notes (optional)
@@ -1559,7 +2062,9 @@ export default function App() {
                 }
               >
                 <h4>Spending Trend</h4>
-                <p className="muted trend-note">{selectedTrendCategoryName}</p>
+                <p className="muted trend-note">
+                  {selectedTrendCategoryName} • {selectedTrendSubcategoryName}
+                </p>
                 <div className="chart-box">
                   {isTrendRangeInvalid ? (
                     <p className="muted">Trend start date must be on or before end date.</p>
@@ -1670,7 +2175,8 @@ export default function App() {
                     <div>
                       <p className="expense-title">{expense.description || expense.categoryName}</p>
                       <p className="expense-meta">
-                        {expense.categoryName} • {expense.date}
+                        {expense.categoryName}
+                        {expense.subcategoryName ? ` / ${expense.subcategoryName}` : ''} • {expense.date}
                       </p>
                     </div>
                     <div className="expense-actions">
@@ -1853,7 +2359,10 @@ export default function App() {
                       <ul>
                         {item.recentExpenses.map((expense) => (
                           <li key={expense.id}>
-                            <span>{expense.description || expense.categoryName}</span>
+                            <span>
+                              {expense.description || expense.categoryName}
+                              {expense.subcategoryName ? ` (${expense.subcategoryName})` : ''}
+                            </span>
                             <strong>{currency.format(expense.amount)}</strong>
                           </li>
                         ))}

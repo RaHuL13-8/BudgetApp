@@ -397,6 +397,27 @@ button:hover {
   gap: 0.5rem;
 }
 
+.category-scroll-wrap,
+.subcategory-scroll-wrap {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+  padding: 0.42rem;
+  max-height: 108px;
+  overflow-y: auto;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.subcategory-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.subcategory-chip {
+  font-size: 0.76rem;
+  padding: 0.3rem 0.58rem;
+}
+
 .chip {
   font-size: 0.79rem;
   padding: 0.34rem 0.65rem;
@@ -858,6 +879,13 @@ button:hover {
     display: block;
     height: 100%;
     overflow: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+
+  .custom-category .secondary {
+    width: 100%;
   }
 
   .mobile-trend-switch {
