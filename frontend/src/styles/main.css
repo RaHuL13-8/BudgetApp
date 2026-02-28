@@ -431,6 +431,34 @@ button:hover {
   grid-template-columns: 1fr auto auto;
 }
 
+.category-modal-form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.category-modal-form label {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.category-color-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.category-color-row input[type='color'] {
+  width: 54px;
+  height: 38px;
+  padding: 0.2rem;
+}
+
+.category-color-row span {
+  color: #cbd5e1;
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+}
+
 .range-switch {
   display: flex;
   gap: 0.46rem;

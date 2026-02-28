@@ -313,6 +313,7 @@ export default function App() {
     setIsRecentFilterModalOpen(false);
     setIsQuickSelectModalOpen(false);
     setIsFriendFilterModalOpen(false);
+    setShowCategoryForm(false);
 
     try {
       const rawQuickCategories = localStorage.getItem(`budget-quick-categories-${userId}`);
@@ -661,7 +662,8 @@ export default function App() {
       isTrendFilterModalOpen ||
       isRecentFilterModalOpen ||
       isQuickSelectModalOpen ||
-      isFriendFilterModalOpen;
+      isFriendFilterModalOpen ||
+      showCategoryForm;
 
     if (!anyModalOpen) {
       return undefined;
@@ -674,6 +676,7 @@ export default function App() {
         setIsRecentFilterModalOpen(false);
         setIsQuickSelectModalOpen(false);
         setIsFriendFilterModalOpen(false);
+        setShowCategoryForm(false);
       }
     };
 
@@ -684,7 +687,8 @@ export default function App() {
     isTrendFilterModalOpen,
     isRecentFilterModalOpen,
     isQuickSelectModalOpen,
-    isFriendFilterModalOpen
+    isFriendFilterModalOpen,
+    showCategoryForm
   ]);
 
   function openQuickSelectModal() {
@@ -1335,6 +1339,44 @@ export default function App() {
         </div>
       ) : null}
 
+      {showCategoryForm ? (
+        <div className="modal-backdrop" onClick={() => setShowCategoryForm(false)}>
+          <div className="modal-card glass filter-modal" onClick={(event) => event.stopPropagation()}>
+            <h3>Create Custom Category</h3>
+            <p>Add a custom category for faster expense tracking.</p>
+            <form className="category-modal-form" onSubmit={onAddCategory}>
+              <label htmlFor="customCategoryName">Category name</label>
+              <input
+                id="customCategoryName"
+                placeholder="e.g. Subscriptions"
+                maxLength={30}
+                value={newCategoryName}
+                onChange={(event) => setNewCategoryName(event.target.value)}
+                autoFocus
+              />
+              <label htmlFor="customCategoryColor">Category color</label>
+              <div className="category-color-row">
+                <input
+                  id="customCategoryColor"
+                  type="color"
+                  value={newCategoryColor}
+                  onChange={(event) => setNewCategoryColor(event.target.value)}
+                />
+                <span>{newCategoryColor.toUpperCase()}</span>
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="secondary" onClick={() => setShowCategoryForm(false)}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary" disabled={submitting}>
+                  {submitting ? 'Adding...' : 'Add Category'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
       {error ? <p className="error-banner">{error}</p> : null}
 
       <section className="metrics-grid">
@@ -1469,32 +1511,9 @@ export default function App() {
             </form>
 
             <div className="custom-category">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => setShowCategoryForm((previous) => !previous)}
-              >
-                {showCategoryForm ? 'Close Custom Category' : 'Create Custom Category'}
+              <button type="button" className="secondary" onClick={() => setShowCategoryForm(true)}>
+                Create Custom Category
               </button>
-
-              {showCategoryForm ? (
-                <form className="category-form" onSubmit={onAddCategory}>
-                  <input
-                    placeholder="Category name"
-                    maxLength={30}
-                    value={newCategoryName}
-                    onChange={(event) => setNewCategoryName(event.target.value)}
-                  />
-                  <input
-                    type="color"
-                    value={newCategoryColor}
-                    onChange={(event) => setNewCategoryColor(event.target.value)}
-                  />
-                  <button type="submit" className="primary" disabled={submitting}>
-                    Add
-                  </button>
-                </form>
-              ) : null}
             </div>
           </article>
 
