@@ -234,16 +234,13 @@ export default function App() {
   const [trendSubcategoryOptions, setTrendSubcategoryOptions] = useState<Subcategory[]>([]);
   const [mobileTab, setMobileTab] = useState<MobileTab>('add');
   const [mobileTrendView, setMobileTrendView] = useState<'trend' | 'split'>('trend');
+  const [mobileFriendView, setMobileFriendView] = useState<'overview' | 'category' | 'recent'>('overview');
   const [recentPage, setRecentPage] = useState(1);
 
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [isTrendFilterModalOpen, setIsTrendFilterModalOpen] = useState(false);
   const [isRecentFilterModalOpen, setIsRecentFilterModalOpen] = useState(false);
-  const [isQuickSelectModalOpen, setIsQuickSelectModalOpen] = useState(false);
   const [isFriendFilterModalOpen, setIsFriendFilterModalOpen] = useState(false);
-
-  const [quickCategoryIds, setQuickCategoryIds] = useState<string[]>([]);
-  const [draftQuickCategoryIds, setDraftQuickCategoryIds] = useState<string[]>([]);
 
   const [amount, setAmount] = useState('');
   const [categoryId, setCategoryId] = useState('');
@@ -356,30 +353,9 @@ export default function App() {
     setIncludeMeInFriendComparison(true);
     setIsTrendFilterModalOpen(false);
     setIsRecentFilterModalOpen(false);
-    setIsQuickSelectModalOpen(false);
     setIsFriendFilterModalOpen(false);
     setShowCategoryForm(false);
-
-    try {
-      const rawQuickCategories = localStorage.getItem(`budget-quick-categories-${userId}`);
-      if (!rawQuickCategories) {
-        setQuickCategoryIds([]);
-      } else {
-        const parsed = JSON.parse(rawQuickCategories);
-        if (Array.isArray(parsed)) {
-          setQuickCategoryIds(parsed.filter((value): value is string => typeof value === 'string'));
-        } else {
-          setQuickCategoryIds([]);
-        }
-      }
-    } catch {
-      setQuickCategoryIds([]);
-    }
   }, [userId]);
-
-  useEffect(() => {
-    localStorage.setItem(`budget-quick-categories-${userId}`, JSON.stringify(quickCategoryIds));
-  }, [quickCategoryIds, userId]);
 
   useEffect(() => {
     void loadData();
@@ -453,7 +429,6 @@ export default function App() {
   );
 
   const quickCategories = useMemo(() => {
-    const categoryById = new Map(categories.map((category) => [category.id, category]));
     const categoryUsage = new Map<string, number>();
 
     for (const expense of expenses) {
@@ -468,14 +443,8 @@ export default function App() {
       return left.name.localeCompare(right.name);
     };
 
-    const selected = quickCategoryIds
-      .map((categoryIdValue) => categoryById.get(categoryIdValue))
-      .filter((category): category is Category => Boolean(category));
-
-    return selected.length > 0
-      ? [...selected].sort(byUsageThenName)
-      : [...categories].sort(byUsageThenName).slice(0, 8);
-  }, [categories, expenses, quickCategoryIds]);
+    return [...categories].sort(byUsageThenName);
+  }, [categories, expenses]);
 
   const sortedSubcategoryOptions = useMemo(() => {
     const subcategoryUsage = new Map<string, number>();
@@ -561,7 +530,7 @@ export default function App() {
   ]);
 
   const isRecentRangeInvalid = Boolean(recentStartDate && recentEndDate && recentStartDate > recentEndDate);
-  const recentPageSize = 4;
+  const recentPageSize = 3;
   const totalRecentPages = Math.max(1, Math.ceil(filteredExpenses.length / recentPageSize));
 
   const paginatedRecentExpenses = useMemo(() => {
@@ -844,13 +813,6 @@ export default function App() {
   }, [friendFilterSubcategories, friendFilterSubcategory]);
 
   useEffect(() => {
-    setQuickCategoryIds((previous) => {
-      const filtered = previous.filter((id) => categories.some((category) => category.id === id));
-      return filtered.length === previous.length ? previous : filtered;
-    });
-  }, [categories]);
-
-  useEffect(() => {
     let cancelled = false;
     const selectedCategoryName = categoryNameById.get(categoryId) ?? '';
 
@@ -986,7 +948,6 @@ export default function App() {
       isUserModalOpen ||
       isTrendFilterModalOpen ||
       isRecentFilterModalOpen ||
-      isQuickSelectModalOpen ||
       isFriendFilterModalOpen ||
       showCategoryForm;
 
@@ -999,7 +960,6 @@ export default function App() {
         setIsUserModalOpen(false);
         setIsTrendFilterModalOpen(false);
         setIsRecentFilterModalOpen(false);
-        setIsQuickSelectModalOpen(false);
         setIsFriendFilterModalOpen(false);
         setShowCategoryForm(false);
       }
@@ -1011,36 +971,9 @@ export default function App() {
     isUserModalOpen,
     isTrendFilterModalOpen,
     isRecentFilterModalOpen,
-    isQuickSelectModalOpen,
     isFriendFilterModalOpen,
     showCategoryForm
   ]);
-
-  function openQuickSelectModal() {
-    setDraftQuickCategoryIds(
-      quickCategoryIds.length > 0 ? quickCategoryIds : categories.slice(0, 8).map((category) => category.id)
-    );
-    setIsQuickSelectModalOpen(true);
-  }
-
-  function toggleDraftQuickCategory(categoryIdValue: string) {
-    setDraftQuickCategoryIds((current) => {
-      if (current.includes(categoryIdValue)) {
-        return current.filter((id) => id !== categoryIdValue);
-      }
-
-      if (current.length >= 8) {
-        return current;
-      }
-
-      return [...current, categoryIdValue];
-    });
-  }
-
-  function saveQuickSelectCategories() {
-    setQuickCategoryIds(draftQuickCategoryIds);
-    setIsQuickSelectModalOpen(false);
-  }
 
   async function onAddExpense(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1758,46 +1691,6 @@ export default function App() {
         </div>
       ) : null}
 
-      {isQuickSelectModalOpen ? (
-        <div className="modal-backdrop" onClick={() => setIsQuickSelectModalOpen(false)}>
-          <div className="modal-card glass filter-modal" onClick={(event) => event.stopPropagation()}>
-            <h3>Quick Select Categories</h3>
-            <p>Choose up to 8 categories for quick chips.</p>
-            <div className="quick-category-grid">
-              {categories.map((category) => {
-                const checked = draftQuickCategoryIds.includes(category.id);
-                const disabled = !checked && draftQuickCategoryIds.length >= 8;
-
-                return (
-                  <label
-                    key={category.id}
-                    className={disabled ? 'quick-category-item disabled' : 'quick-category-item'}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      disabled={disabled}
-                      onChange={() => toggleDraftQuickCategory(category.id)}
-                    />
-                    <span className="quick-category-dot" style={{ backgroundColor: category.color }} />
-                    <span>{category.name}</span>
-                  </label>
-                );
-              })}
-            </div>
-            <p className="quick-category-count">{draftQuickCategoryIds.length}/8 selected</p>
-            <div className="modal-actions">
-              <button type="button" className="secondary" onClick={() => setIsQuickSelectModalOpen(false)}>
-                Cancel
-              </button>
-              <button type="button" className="primary" onClick={saveQuickSelectCategories}>
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {showCategoryForm ? (
         <div className="modal-backdrop" onClick={() => setShowCategoryForm(false)}>
           <div className="modal-card glass filter-modal" onClick={(event) => event.stopPropagation()}>
@@ -1895,71 +1788,53 @@ export default function App() {
             </div>
 
             <form className="expense-form" onSubmit={onAddExpense}>
-              <label>
-                Amount (INR)
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  required
-                  value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
-                  placeholder="42.50"
-                />
-              </label>
+              <div className="amount-date-row">
+                <label>
+                  Amount (INR)
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    required
+                    value={amount}
+                    onChange={(event) => setAmount(event.target.value)}
+                    placeholder="42.50"
+                  />
+                </label>
 
-              <label>
-                Date
-                <input
-                  type="date"
-                  required
-                  value={expenseDate}
-                  onChange={(event) => setExpenseDate(event.target.value)}
-                />
-              </label>
+                <label>
+                  Date
+                  <input
+                    type="date"
+                    required
+                    value={expenseDate}
+                    onChange={(event) => setExpenseDate(event.target.value)}
+                  />
+                </label>
+              </div>
 
-              <label>
-                Category
-                <select required value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>
-                  {categories.map((category) => (
-                    <option key={category.id} value={category.id}>
-                      {category.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <p className="picker-label">Category</p>
 
-              <div className="chips-row">
-                <div className="category-scroll-wrap">
-                  <div className="chips">
-                    {quickCategories.map((category) => {
-                      const selected = category.id === categoryId;
-                      return (
-                        <button
-                          type="button"
-                          className={selected ? 'chip active' : 'chip'}
-                          key={category.id}
-                          style={{
-                            borderColor: category.color,
-                            backgroundColor: withHexAlpha(category.color, selected ? '40' : '22')
-                          }}
-                          onClick={() => setCategoryId(category.id)}
-                        >
-                          {category.name}
-                        </button>
-                      );
-                    })}
-                  </div>
+              <div className="category-scroll-wrap">
+                <div className="chips">
+                  {quickCategories.map((category) => {
+                    const selected = category.id === categoryId;
+                    return (
+                      <button
+                        type="button"
+                        className={selected ? 'chip active' : 'chip'}
+                        key={category.id}
+                        style={{
+                          borderColor: category.color,
+                          backgroundColor: withHexAlpha(category.color, selected ? '40' : '22')
+                        }}
+                        onClick={() => setCategoryId(category.id)}
+                      >
+                        {category.name}
+                      </button>
+                    );
+                  })}
                 </div>
-                <button
-                  type="button"
-                  className="quick-chip-edit-btn"
-                  onClick={openQuickSelectModal}
-                  aria-label="Edit quick select categories"
-                  title="Edit quick select categories"
-                >
-                  ✎
-                </button>
               </div>
 
               <label>
@@ -2073,7 +1948,7 @@ export default function App() {
                   ) : trendData.length === 0 ? (
                     <p className="muted">No trend data for selected filters.</p>
                   ) : (
-                    <ResponsiveContainer width="100%" height={250}>
+                    <ResponsiveContainer width="100%" height={220}>
                       <AreaChart data={trendData}>
                         <defs>
                           <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
@@ -2115,7 +1990,7 @@ export default function App() {
                   {pieData.length === 0 ? (
                     <p className="muted">Add expenses to unlock category split.</p>
                   ) : (
-                    <ResponsiveContainer width="100%" height={250}>
+                    <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
                         <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={56} outerRadius={90}>
                           {pieData.map((item) => (
@@ -2246,132 +2121,186 @@ export default function App() {
             <p className="muted">Add friends from Profile to unlock comparison insights.</p>
           ) : null}
 
-          {friendHighlights ? (
-            <div className="friend-highlight-grid">
-              <article className="friend-highlight-card">
-                <p>Highest Spender</p>
-                <h5>
-                  {friendHighlights.highestSpender.isCurrentUser
-                    ? `${friendHighlights.highestSpender.user.username} (You)`
-                    : friendHighlights.highestSpender.user.username}
-                </h5>
-                <strong>{currency.format(friendHighlights.highestSpender.totalSpend)}</strong>
-              </article>
-              <article className="friend-highlight-card">
-                <p>Most Active</p>
-                <h5>
-                  {friendHighlights.mostActive.isCurrentUser
-                    ? `${friendHighlights.mostActive.user.username} (You)`
-                    : friendHighlights.mostActive.user.username}
-                </h5>
-                <strong>{friendHighlights.mostActive.expenses.length} expenses</strong>
-              </article>
-              <article className="friend-highlight-card">
-                <p>Top Shared Category</p>
-                <h5>{friendHighlights.topCategoryEntry?.[0] ?? 'No category yet'}</h5>
-                <strong>
-                  {friendHighlights.topCategoryEntry
-                    ? currency.format(friendHighlights.topCategoryEntry[1])
-                    : '$0.00'}
-                </strong>
-              </article>
-            </div>
-          ) : null}
-
-          <div className="friend-section">
-            <h4>Overall Spend Comparison</h4>
-            <div className="chart-box friend-chart-box">
-              {isFriendRangeInvalid ? (
-                <p className="muted">Fix the date range to view comparison charts.</p>
-              ) : friendComparisonData.length <= 1 ? (
-                <p className="muted">Add at least one friend (or include yourself) to compare overall spend.</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={240}>
-                  <BarChart data={friendComparisonData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
-                    <XAxis dataKey="name" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
-                    <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
-                    <Tooltip formatter={(value: number) => currency.format(value)} />
-                    <Bar dataKey="amount" fill="#22C55E" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
+          <div className="mobile-friend-switch">
+            <button
+              type="button"
+              className={mobileFriendView === 'overview' ? 'range-btn active' : 'range-btn'}
+              onClick={() => setMobileFriendView('overview')}
+            >
+              Overview
+            </button>
+            <button
+              type="button"
+              className={mobileFriendView === 'category' ? 'range-btn active' : 'range-btn'}
+              onClick={() => setMobileFriendView('category')}
+            >
+              Category
+            </button>
+            <button
+              type="button"
+              className={mobileFriendView === 'recent' ? 'range-btn active' : 'range-btn'}
+              onClick={() => setMobileFriendView('recent')}
+            >
+              Recents
+            </button>
           </div>
 
-          <div className="friend-section">
-            <h4>Category-Wise Spend Comparison</h4>
-            <div className="chart-box friend-chart-box">
-              {isFriendRangeInvalid ? (
-                <p className="muted">Fix the date range to view category-wise comparison.</p>
-              ) : friendCategoryComparisonData.length === 0 ? (
-                <p className="muted">Need at least two profiles with expenses in selected filters.</p>
-              ) : (
-                <ResponsiveContainer width="100%" height={280}>
-                  <BarChart data={friendCategoryComparisonData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
-                    <XAxis dataKey="category" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
-                    <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
-                    <Tooltip formatter={(value: number) => currency.format(value)} />
-                    {friendSeries.map((series) => (
-                      <Bar key={series.key} dataKey={series.key} name={series.label} fill={series.color} radius={[4, 4, 0, 0]} />
-                    ))}
-                  </BarChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-
-          <div className="friend-section">
-            <h4>Top Category Per Person</h4>
-            {friendInsightsForComparison.length === 0 ? (
-              <p className="muted">No profiles available in current comparison scope.</p>
-            ) : (
-              <ul className="friend-top-list">
-                {friendInsightsForComparison.map((item) => (
-                  <li key={item.user.id}>
-                    <p>{item.isCurrentUser ? `${item.user.username} (You)` : item.user.username}</p>
-                    <p>
-                      {item.topCategory
-                        ? `${item.topCategory.name} • ${currency.format(item.topCategory.amount)}`
-                        : 'No spending yet'}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="friend-section">
-            <h4>Recent Friend Expenses</h4>
-            {isFriendRangeInvalid ? (
-              <p className="muted">Fix the date range to view friend recents.</p>
-            ) : filteredFriendOnlyInsights.length === 0 ? (
-              <p className="muted">No friend expenses found for selected filters.</p>
-            ) : (
-              <div className="friend-recents-grid">
-                {filteredFriendOnlyInsights.map((item) => (
-                  <article key={item.user.id} className="friend-recent-card">
-                    <h5>@{item.user.username}</h5>
-                    {item.recentExpenses.length === 0 ? (
-                      <p className="muted">No expenses yet.</p>
-                    ) : (
-                      <ul>
-                        {item.recentExpenses.map((expense) => (
-                          <li key={expense.id}>
-                            <span>
-                              {expense.description || expense.categoryName}
-                              {expense.subcategoryName ? ` (${expense.subcategoryName})` : ''}
-                            </span>
-                            <strong>{currency.format(expense.amount)}</strong>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </article>
-                ))}
+          <div
+            className={
+              mobileFriendView === 'overview'
+                ? 'mobile-friend-pane mobile-friend-overview is-active'
+                : 'mobile-friend-pane mobile-friend-overview'
+            }
+          >
+            {friendHighlights ? (
+              <div className="friend-highlight-grid">
+                <article className="friend-highlight-card">
+                  <p>Highest Spender</p>
+                  <h5>
+                    {friendHighlights.highestSpender.isCurrentUser
+                      ? `${friendHighlights.highestSpender.user.username} (You)`
+                      : friendHighlights.highestSpender.user.username}
+                  </h5>
+                  <strong>{currency.format(friendHighlights.highestSpender.totalSpend)}</strong>
+                </article>
+                <article className="friend-highlight-card">
+                  <p>Most Active</p>
+                  <h5>
+                    {friendHighlights.mostActive.isCurrentUser
+                      ? `${friendHighlights.mostActive.user.username} (You)`
+                      : friendHighlights.mostActive.user.username}
+                  </h5>
+                  <strong>{friendHighlights.mostActive.expenses.length} expenses</strong>
+                </article>
+                <article className="friend-highlight-card">
+                  <p>Top Shared Category</p>
+                  <h5>{friendHighlights.topCategoryEntry?.[0] ?? 'No category yet'}</h5>
+                  <strong>
+                    {friendHighlights.topCategoryEntry
+                      ? currency.format(friendHighlights.topCategoryEntry[1])
+                      : currency.format(0)}
+                  </strong>
+                </article>
               </div>
-            )}
+            ) : null}
+
+            <div className="friend-section">
+              <h4>Overall Spend Comparison</h4>
+              <div className="chart-box friend-chart-box">
+                {isFriendRangeInvalid ? (
+                  <p className="muted">Fix the date range to view comparison charts.</p>
+                ) : friendComparisonData.length <= 1 ? (
+                  <p className="muted">Add at least one friend (or include yourself) to compare overall spend.</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={friendComparisonData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
+                      <XAxis dataKey="name" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                      <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                      <Tooltip formatter={(value: number) => currency.format(value)} />
+                      <Bar dataKey="amount" fill="#22C55E" radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div
+            className={
+              mobileFriendView === 'category'
+                ? 'mobile-friend-pane mobile-friend-category is-active'
+                : 'mobile-friend-pane mobile-friend-category'
+            }
+          >
+            <div className="friend-section">
+              <h4>Category-Wise Spend Comparison</h4>
+              <div className="chart-box friend-chart-box">
+                {isFriendRangeInvalid ? (
+                  <p className="muted">Fix the date range to view category-wise comparison.</p>
+                ) : friendCategoryComparisonData.length === 0 ? (
+                  <p className="muted">Need at least two profiles with expenses in selected filters.</p>
+                ) : (
+                  <ResponsiveContainer width="100%" height={240}>
+                    <BarChart data={friendCategoryComparisonData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(148, 163, 184, 0.2)" />
+                      <XAxis dataKey="category" tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                      <YAxis tick={{ fill: '#CBD5E1', fontSize: 11 }} />
+                      <Tooltip formatter={(value: number) => currency.format(value)} />
+                      {friendSeries.map((series) => (
+                        <Bar
+                          key={series.key}
+                          dataKey={series.key}
+                          name={series.label}
+                          fill={series.color}
+                          radius={[4, 4, 0, 0]}
+                        />
+                      ))}
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </div>
+
+            <div className="friend-section">
+              <h4>Top Category Per Person</h4>
+              {friendInsightsForComparison.length === 0 ? (
+                <p className="muted">No profiles available in current comparison scope.</p>
+              ) : (
+                <ul className="friend-top-list">
+                  {friendInsightsForComparison.map((item) => (
+                    <li key={item.user.id}>
+                      <p>{item.isCurrentUser ? `${item.user.username} (You)` : item.user.username}</p>
+                      <p>
+                        {item.topCategory
+                          ? `${item.topCategory.name} • ${currency.format(item.topCategory.amount)}`
+                          : 'No spending yet'}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+
+          <div
+            className={
+              mobileFriendView === 'recent'
+                ? 'mobile-friend-pane mobile-friend-recent is-active'
+                : 'mobile-friend-pane mobile-friend-recent'
+            }
+          >
+            <div className="friend-section">
+              <h4>Recent Friend Expenses</h4>
+              {isFriendRangeInvalid ? (
+                <p className="muted">Fix the date range to view friend recents.</p>
+              ) : filteredFriendOnlyInsights.length === 0 ? (
+                <p className="muted">No friend expenses found for selected filters.</p>
+              ) : (
+                <div className="friend-recents-grid">
+                  {filteredFriendOnlyInsights.map((item) => (
+                    <article key={item.user.id} className="friend-recent-card">
+                      <h5>@{item.user.username}</h5>
+                      {item.recentExpenses.length === 0 ? (
+                        <p className="muted">No expenses yet.</p>
+                      ) : (
+                        <ul>
+                          {item.recentExpenses.map((expense) => (
+                            <li key={expense.id}>
+                              <span>
+                                {expense.description || expense.categoryName}
+                                {expense.subcategoryName ? ` (${expense.subcategoryName})` : ''}
+                              </span>
+                              <strong>{currency.format(expense.amount)}</strong>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </section>
       </div>
