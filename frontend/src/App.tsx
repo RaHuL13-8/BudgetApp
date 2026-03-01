@@ -90,6 +90,14 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function hashString(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 37 + value.charCodeAt(index)) % 9973;
+  }
+  return hash;
+}
+
 function colorToHsl(color: string): { h: number; s: number; l: number } | null {
   const normalized = color.trim();
   const hex = /^#([0-9a-fA-F]{6})$/.exec(normalized);
@@ -133,27 +141,36 @@ function colorToHsl(color: string): { h: number; s: number; l: number } | null {
   };
 }
 
-function subcategoryColorFromCategory(categoryColor: string | undefined, key: string): string {
-  let hash = 0;
-  for (let index = 0; index < key.length; index += 1) {
-    hash = (hash * 37 + key.charCodeAt(index)) % 997;
-  }
-
+function subcategoryGradientColorFromCategory(
+  categoryColor: string | undefined,
+  categoryKey: string,
+  index: number,
+  total: number
+): string {
+  const safeTotal = Math.max(total, 1);
+  const progress = safeTotal === 1 ? 0.5 : index / (safeTotal - 1);
+  const seed = hashString(categoryKey);
   const base = categoryColor ? colorToHsl(categoryColor) : null;
   if (!base) {
-    return subcategoryColor(key);
+    const fallbackHue = hashString(categoryKey) % 360;
+    const hue = (fallbackHue + progress * 14) % 360;
+    const saturation = 72 - progress * 14;
+    const lightness = 56 + progress * 20;
+    return `hsl(${Math.round(hue)} ${Math.round(saturation)}% ${Math.round(lightness)}%)`;
   }
 
-  // Keep outer-ring colors related to parent category, but lighter with stronger variation.
-  const hueShift = (hash % 37) - 18;
-  const saturationShift = ((hash >> 2) % 25) - 12;
-  const lightnessShift = ((hash >> 4) % 15) - 7;
+  // Generate an increasing lighter gradient for subcategories within the same parent category.
+  const hueStartShift = (seed % 9) - 4;
+  const hueSpanShift = ((seed >> 3) % 11) - 5;
+  const hue = (base.h + hueStartShift + hueSpanShift * progress + 360) % 360;
 
-  const hue = (base.h + hueShift + 360) % 360;
-  const saturation = clamp(base.s + saturationShift, 28, 96);
-  const liftedLightnessTarget = clamp(base.l + 9 + lightnessShift, 20, 92);
-  const guaranteedLighterThanBase = clamp(base.l + 4, 20, 92);
-  const lightness = Math.max(liftedLightnessTarget, guaranteedLighterThanBase);
+  const startSaturation = clamp(base.s + 6, 30, 96);
+  const endSaturation = clamp(base.s - 10, 24, 92);
+  const saturation = startSaturation + (endSaturation - startSaturation) * progress;
+
+  const startLightness = clamp(base.l + 9, 24, 92);
+  const endLightness = clamp(base.l + 20, startLightness + 2, 95);
+  const lightness = startLightness + (endLightness - startLightness) * progress;
 
   return `hsl(${Math.round(hue)} ${saturation}% ${lightness}%)`;
 }
@@ -560,18 +577,13 @@ export default function App() {
   const subcategorySplitData = useMemo(() => {
     const categoryColorByName = new Map(categories.map((category) => [category.name, category.color]));
     const categoryTotals = new Map<string, number>();
-    const totals = new Map<
-      string,
-      { name: string; categoryName: string; subcategoryName: string; value: number; color: string }
-    >();
+    const totals = new Map<string, { name: string; categoryName: string; subcategoryName: string; value: number }>();
 
     for (const expense of trendSplitExpenses) {
       const subcategory = expense.subcategoryName.trim() || 'Other';
       const category = expense.categoryName;
       const key = `${category}::${normalizeSubcategory(subcategory)}`;
       const existing = totals.get(key);
-      const baseColor = categoryColorByName.get(category);
-      const color = subcategoryColorFromCategory(baseColor, key);
       categoryTotals.set(category, (categoryTotals.get(category) ?? 0) + Number(expense.amount));
 
       if (existing) {
@@ -582,15 +594,13 @@ export default function App() {
           name: `${category} / ${subcategory}`,
           categoryName: category,
           subcategoryName: subcategory,
-          value: Number(expense.amount),
-          color
+          value: Number(expense.amount)
         });
       }
     }
 
     const grandTotal = Array.from(totals.values()).reduce((sum, item) => sum + item.value, 0);
-
-    return Array.from(totals.values())
+    const withPercentages = Array.from(totals.values())
       .map((item) => ({
         ...item,
         percentage: grandTotal > 0 ? (item.value / grandTotal) * 100 : 0,
@@ -598,9 +608,41 @@ export default function App() {
           (categoryTotals.get(item.categoryName) ?? 0) > 0
             ? (item.value / (categoryTotals.get(item.categoryName) ?? 1)) * 100
             : 0
-      }))
-      .sort((left, right) => right.value - left.value);
-  }, [categories, trendSplitExpenses]);
+      }));
+
+    const groupedByCategory = new Map<string, typeof withPercentages>();
+    for (const item of withPercentages) {
+      const list = groupedByCategory.get(item.categoryName) ?? [];
+      list.push(item);
+      groupedByCategory.set(item.categoryName, list);
+    }
+
+    const categoryRank = new Map(pieData.map((category, index) => [category.name, index]));
+    const orderedCategories = Array.from(groupedByCategory.keys()).sort((left, right) => {
+      const leftRank = categoryRank.get(left) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = categoryRank.get(right) ?? Number.MAX_SAFE_INTEGER;
+      return leftRank - rightRank || left.localeCompare(right);
+    });
+
+    const colored = orderedCategories.flatMap((categoryName) => {
+      const items = [...(groupedByCategory.get(categoryName) ?? [])].sort(
+        (left, right) => right.value - left.value || left.subcategoryName.localeCompare(right.subcategoryName)
+      );
+      const baseColor = categoryColorByName.get(categoryName);
+
+      return items.map((item, index) => ({
+        ...item,
+        color: subcategoryGradientColorFromCategory(
+          baseColor,
+          `${categoryName}:${normalizeSubcategory(item.subcategoryName)}`,
+          index,
+          items.length
+        )
+      }));
+    });
+
+    return colored;
+  }, [categories, trendSplitExpenses, pieData]);
 
   const splitLegendGroups = useMemo(() => {
     const subByCategory = new Map<string, typeof subcategorySplitData>();
