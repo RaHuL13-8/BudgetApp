@@ -371,12 +371,13 @@ button:hover {
 
 .category-scroll-wrap,
 .subcategory-scroll-wrap {
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 10px;
-  padding: 0.42rem;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
   max-height: 108px;
   overflow-y: auto;
-  background: rgba(15, 23, 42, 0.38);
+  background: transparent;
+  -webkit-overflow-scrolling: touch;
 }
 
 .subcategory-chips {
@@ -515,6 +516,43 @@ button:hover {
   margin: 0;
   color: #cbd5e1;
   font-size: 0.83rem;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.split-hier-legend {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.split-hier-category {
+  display: grid;
+  gap: 0.36rem;
+}
+
+.split-hier-sub-list {
+  margin-left: 1rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.split-hier-sub-item {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.split-hier-sub-item span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.split-hier-sub-item p {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 0.79rem;
   display: flex;
   justify-content: space-between;
   width: 100%;
@@ -854,13 +892,28 @@ button:hover {
     overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    display: block;
+    display: flex;
+    flex-direction: column;
     padding-bottom: calc(0.65rem + env(safe-area-inset-bottom));
   }
 
   .content-grid {
     min-height: 0;
     display: block;
+    flex: 1 1 auto;
+  }
+
+  .mobile-main.mobile-main-add .content-grid,
+  .mobile-main.mobile-main-trends .content-grid {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 100%;
+  }
+
+  .mobile-main.mobile-main-recent .content-grid,
+  .mobile-main.mobile-main-friends .content-grid {
+    display: none;
   }
 
   .mobile-panel-add,
@@ -874,11 +927,18 @@ button:hover {
   .mobile-panel-trends.is-active,
   .mobile-panel-recent.is-active,
   .mobile-panel-friends.is-active {
-    display: block;
-    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
     height: auto;
     overflow: visible;
     padding-bottom: 0.72rem;
+  }
+
+  .mobile-main.mobile-main-add .mobile-panel-add.is-active,
+  .mobile-main.mobile-main-trends .mobile-panel-trends.is-active {
+    min-height: 100%;
   }
 
   .custom-category .secondary {
@@ -892,7 +952,7 @@ button:hover {
 
   .mobile-tab-btn {
     padding: 0.52rem 0.4rem;
-    font-size: 0.76rem;
+    font-size: 0.72rem;
   }
 
   .panel {
@@ -953,6 +1013,10 @@ button:hover {
   .mobile-chart-trend.is-active,
   .mobile-chart-split.is-active {
     display: block;
+  }
+
+  .split-hier-legend {
+    gap: 0.6rem;
   }
 
   .mobile-friend-switch {
@@ -1031,7 +1095,7 @@ button:hover {
 
   .mobile-tab-btn {
     padding: 0.46rem 0.34rem;
-    font-size: 0.72rem;
+    font-size: 0.68rem;
   }
 
   .panel {
@@ -1072,6 +1136,11 @@ button:hover {
 
   .panel-head span {
     display: none;
+  }
+
+  .mobile-tabs {
+    gap: 0.28rem;
+    padding: 0.32rem;
   }
 
   .expense-form,
@@ -1134,6 +1203,7 @@ button:hover {
   .friend-recent-card {
     padding: 0.52rem;
   }
+
 }
 
 @media (min-width: 1025px) {
@@ -1179,5 +1249,10 @@ button:hover {
 
   .friend-recents-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .split-hier-legend {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.9rem;
   }
 }

@@ -86,6 +86,78 @@ function subcategoryColor(name: string): string {
   return `hsl(${hash} 72% 52%)`;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function colorToHsl(color: string): { h: number; s: number; l: number } | null {
+  const normalized = color.trim();
+  const hex = /^#([0-9a-fA-F]{6})$/.exec(normalized);
+  if (!hex) {
+    return null;
+  }
+
+  const value = hex[1];
+  const r = parseInt(value.slice(0, 2), 16) / 255;
+  const g = parseInt(value.slice(2, 4), 16) / 255;
+  const b = parseInt(value.slice(4, 6), 16) / 255;
+
+  const cMax = Math.max(r, g, b);
+  const cMin = Math.min(r, g, b);
+  const delta = cMax - cMin;
+  const lightness = (cMax + cMin) / 2;
+
+  if (delta === 0) {
+    return { h: 0, s: 0, l: Math.round(lightness * 100) };
+  }
+
+  let hue = 0;
+  if (cMax === r) {
+    hue = ((g - b) / delta) % 6;
+  } else if (cMax === g) {
+    hue = (b - r) / delta + 2;
+  } else {
+    hue = (r - g) / delta + 4;
+  }
+
+  hue *= 60;
+  if (hue < 0) {
+    hue += 360;
+  }
+
+  const saturation = delta / (1 - Math.abs(2 * lightness - 1));
+  return {
+    h: Math.round(hue),
+    s: Math.round(saturation * 100),
+    l: Math.round(lightness * 100)
+  };
+}
+
+function subcategoryColorFromCategory(categoryColor: string | undefined, key: string): string {
+  let hash = 0;
+  for (let index = 0; index < key.length; index += 1) {
+    hash = (hash * 37 + key.charCodeAt(index)) % 997;
+  }
+
+  const base = categoryColor ? colorToHsl(categoryColor) : null;
+  if (!base) {
+    return subcategoryColor(key);
+  }
+
+  // Keep outer-ring colors related to parent category, but lighter with stronger variation.
+  const hueShift = (hash % 37) - 18;
+  const saturationShift = ((hash >> 2) % 25) - 12;
+  const lightnessShift = ((hash >> 4) % 15) - 7;
+
+  const hue = (base.h + hueShift + 360) % 360;
+  const saturation = clamp(base.s + saturationShift, 28, 96);
+  const liftedLightnessTarget = clamp(base.l + 9 + lightnessShift, 20, 92);
+  const guaranteedLighterThanBase = clamp(base.l + 4, 20, 92);
+  const lightness = Math.max(liftedLightnessTarget, guaranteedLighterThanBase);
+
+  return `hsl(${Math.round(hue)} ${saturation}% ${lightness}%)`;
+}
+
 function rangeWindowStart(range: 'daily' | 'monthly' | 'yearly', endDate: Date): Date {
   if (range === 'daily') {
     const start = new Date(endDate);
@@ -423,9 +495,49 @@ export default function App() {
     [rangeExpenses]
   );
 
+  const isTrendRangeInvalid = Boolean(trendStartDate && trendEndDate && trendStartDate > trendEndDate);
+
+  const trendSplitExpenses = useMemo(() => {
+    if (isTrendRangeInvalid) {
+      return [] as Expense[];
+    }
+
+    const filteredBySelection = expenses.filter((expense) => {
+      const categoryMatch = trendCategoryId === 'all' || expense.categoryId === trendCategoryId;
+      const subcategoryMatch =
+        trendSubcategory === 'all' || normalizeSubcategory(expense.subcategoryName) === trendSubcategory;
+      return categoryMatch && subcategoryMatch;
+    });
+
+    const now = new Date();
+    const normalizedEnd = trendEndDate
+      ? parseIsoDate(trendEndDate)
+      : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const normalizedStart = trendStartDate
+      ? parseIsoDate(trendStartDate)
+      : rangeWindowStart(range, normalizedEnd);
+
+    if (normalizedStart > normalizedEnd) {
+      return [] as Expense[];
+    }
+
+    return filteredBySelection.filter((expense) => {
+      const expenseDate = parseIsoDate(expense.date);
+      return expenseDate >= normalizedStart && expenseDate <= normalizedEnd;
+    });
+  }, [
+    expenses,
+    trendCategoryId,
+    trendSubcategory,
+    trendStartDate,
+    trendEndDate,
+    range,
+    isTrendRangeInvalid
+  ]);
+
   const pieData = useMemo(() => {
     const totalsByCategory = new Map<string, number>();
-    for (const expense of rangeExpenses) {
+    for (const expense of trendSplitExpenses) {
       totalsByCategory.set(
         expense.categoryName,
         (totalsByCategory.get(expense.categoryName) ?? 0) + Number(expense.amount)
@@ -433,17 +545,76 @@ export default function App() {
     }
 
     const colorByName = new Map(categories.map((category) => [category.name, category.color]));
+    const grandTotal = Array.from(totalsByCategory.values()).reduce((sum, value) => sum + value, 0);
 
     return Array.from(totalsByCategory.entries())
       .map(([name, value]) => ({
         name,
         value,
+        percentage: grandTotal > 0 ? (value / grandTotal) * 100 : 0,
         color: colorByName.get(name) ?? '#64748B'
       }))
       .sort((left, right) => right.value - left.value);
-  }, [categories, rangeExpenses]);
+  }, [categories, trendSplitExpenses]);
 
-  const isTrendRangeInvalid = Boolean(trendStartDate && trendEndDate && trendStartDate > trendEndDate);
+  const subcategorySplitData = useMemo(() => {
+    const categoryColorByName = new Map(categories.map((category) => [category.name, category.color]));
+    const categoryTotals = new Map<string, number>();
+    const totals = new Map<
+      string,
+      { name: string; categoryName: string; subcategoryName: string; value: number; color: string }
+    >();
+
+    for (const expense of trendSplitExpenses) {
+      const subcategory = expense.subcategoryName.trim() || 'Other';
+      const category = expense.categoryName;
+      const key = `${category}::${normalizeSubcategory(subcategory)}`;
+      const existing = totals.get(key);
+      const baseColor = categoryColorByName.get(category);
+      const color = subcategoryColorFromCategory(baseColor, key);
+      categoryTotals.set(category, (categoryTotals.get(category) ?? 0) + Number(expense.amount));
+
+      if (existing) {
+        existing.value += Number(expense.amount);
+        totals.set(key, existing);
+      } else {
+        totals.set(key, {
+          name: `${category} / ${subcategory}`,
+          categoryName: category,
+          subcategoryName: subcategory,
+          value: Number(expense.amount),
+          color
+        });
+      }
+    }
+
+    const grandTotal = Array.from(totals.values()).reduce((sum, item) => sum + item.value, 0);
+
+    return Array.from(totals.values())
+      .map((item) => ({
+        ...item,
+        percentage: grandTotal > 0 ? (item.value / grandTotal) * 100 : 0,
+        categoryPercentage:
+          (categoryTotals.get(item.categoryName) ?? 0) > 0
+            ? (item.value / (categoryTotals.get(item.categoryName) ?? 1)) * 100
+            : 0
+      }))
+      .sort((left, right) => right.value - left.value);
+  }, [categories, trendSplitExpenses]);
+
+  const splitLegendGroups = useMemo(() => {
+    const subByCategory = new Map<string, typeof subcategorySplitData>();
+    for (const sub of subcategorySplitData) {
+      const list = subByCategory.get(sub.categoryName) ?? [];
+      list.push(sub);
+      subByCategory.set(sub.categoryName, list);
+    }
+
+    return pieData.map((category) => ({
+      ...category,
+      subcategories: (subByCategory.get(category.name) ?? []).sort((left, right) => right.value - left.value)
+    }));
+  }, [pieData, subcategorySplitData]);
 
   const trendData = useMemo(() => {
     if (isTrendRangeInvalid) {
@@ -2007,7 +2178,11 @@ export default function App() {
         </button>
       </nav>
 
-      <div className="mobile-main" onTouchStart={onMobileTouchStart} onTouchEnd={onMobileTouchEnd}>
+      <div
+        className={`mobile-main mobile-main-${mobileTab}`}
+        onTouchStart={onMobileTouchStart}
+        onTouchEnd={onMobileTouchEnd}
+      >
         <section className="content-grid">
           <article
             className={mobileTab === 'add' ? 'panel glass mobile-panel-add is-active' : 'panel glass mobile-panel-add'}
@@ -2216,30 +2391,91 @@ export default function App() {
                   mobileTrendView === 'split' ? 'chart-wrap mobile-chart-split is-active' : 'chart-wrap mobile-chart-split'
                 }
               >
-                <h4>Category Split ({range})</h4>
+                <h4>Category + Subcategory Split ({range})</h4>
                 <div className="chart-box">
                   {pieData.length === 0 ? (
                     <p className="muted">Add expenses to unlock category split.</p>
                   ) : (
                     <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
-                        <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={56} outerRadius={90}>
+                        <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={40} outerRadius={62}>
                           {pieData.map((item) => (
                             <Cell key={item.name} fill={item.color} />
                           ))}
                         </Pie>
-                        <Tooltip formatter={(value: number) => currency.format(value)} />
+                        {subcategorySplitData.length > 0 ? (
+                          <Pie
+                            data={subcategorySplitData}
+                            dataKey="value"
+                            nameKey="name"
+                            innerRadius={68}
+                            outerRadius={90}
+                          >
+                            {subcategorySplitData.map((item) => (
+                              <Cell key={item.name} fill={item.color} />
+                            ))}
+                          </Pie>
+                        ) : null}
+                        <Tooltip
+                          formatter={(
+                            value: number,
+                            _name: string,
+                            payload: {
+                              payload?: {
+                                percentage?: number;
+                                categoryPercentage?: number;
+                                categoryName?: string;
+                                subcategoryName?: string;
+                                name?: string;
+                              };
+                            }
+                          ) => {
+                            const item = payload?.payload;
+                            if (item?.subcategoryName) {
+                              return [
+                                `${currency.format(value)} (${(item.percentage ?? 0).toFixed(1)}% of total, ${(item.categoryPercentage ?? 0).toFixed(1)}% of ${item.categoryName})`,
+                                item.subcategoryName
+                              ];
+                            }
+
+                            return [
+                              `${currency.format(value)} (${(item?.percentage ?? 0).toFixed(1)}% of total)`,
+                              item?.name ?? 'Category'
+                            ];
+                          }}
+                        />
                       </PieChart>
                     </ResponsiveContainer>
                   )}
                 </div>
-                <div className="legend">
-                  {pieData.map((item) => (
-                    <div className="legend-item" key={item.name}>
-                      <span style={{ backgroundColor: item.color }} />
-                      <p>
-                        {item.name} <strong>{currency.format(item.value)}</strong>
-                      </p>
+                <div className="split-hier-legend">
+                  {splitLegendGroups.map((group) => (
+                    <div className="split-hier-category" key={group.name}>
+                      <div className="legend-item">
+                        <span style={{ backgroundColor: group.color }} />
+                        <p>
+                          {group.name}{' '}
+                          <strong>
+                            {currency.format(group.value)} ({group.percentage.toFixed(1)}%)
+                          </strong>
+                        </p>
+                      </div>
+                      {group.subcategories.length > 0 ? (
+                        <div className="split-hier-sub-list">
+                          {group.subcategories.map((sub) => (
+                            <div className="split-hier-sub-item" key={sub.name}>
+                              <span style={{ backgroundColor: sub.color }} />
+                              <p>
+                                {sub.subcategoryName}{' '}
+                                <strong>
+                                  {currency.format(sub.value)} ({sub.percentage.toFixed(1)}% total,{' '}
+                                  {sub.categoryPercentage.toFixed(1)}% in {group.name})
+                                </strong>
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
