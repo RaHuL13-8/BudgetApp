@@ -178,6 +178,19 @@ h5 {
   font-size: 0.78rem;
 }
 
+.panel-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: -0.08rem 0 0.72rem;
+}
+
+.panel-top-row .filter-trigger-btn {
+  margin-left: auto;
+}
+
 .user-switcher {
   display: grid;
   gap: 0.45rem;
@@ -677,6 +690,96 @@ button:hover {
   padding: 0;
 }
 
+.fancy-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #cbd5e1;
+  font-size: 0.8rem;
+  width: auto;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
+  transition: color 0.16s ease;
+  cursor: pointer;
+}
+
+.fancy-toggle:hover {
+  color: #e2e8f0;
+}
+
+.fancy-toggle-input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fancy-toggle-indicator {
+  width: 30px;
+  height: 17px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.36);
+  background: rgba(15, 23, 42, 0.72);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.fancy-toggle-indicator::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #dbe7f4;
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.fancy-toggle-input:checked + .fancy-toggle-indicator {
+  background: rgba(14, 165, 233, 0.22);
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
+.fancy-toggle-input:checked + .fancy-toggle-indicator::after {
+  transform: translateX(13px);
+  background: #f8fafc;
+}
+
+.fancy-toggle > span:last-child {
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.fancy-toggle-input:focus-visible + .fancy-toggle-indicator {
+  outline: 2px solid rgba(56, 189, 248, 0.55);
+  outline-offset: 2px;
+}
+
+.fancy-toggle-input:disabled + .fancy-toggle-indicator {
+  opacity: 0.7;
+}
+
+.fancy-toggle-input:disabled + .fancy-toggle-indicator + span {
+  opacity: 0.75;
+}
+
+.fancy-toggle-input {
+  margin: 0;
+  padding: 0;
+}
+
+.expense-form label.fancy-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  width: auto;
+}
+
 .friend-filter-summary {
   padding: 0;
   margin-bottom: 0.55rem;
@@ -937,7 +1040,8 @@ button:hover {
   }
 
   .mobile-main.mobile-main-add .mobile-panel-add.is-active,
-  .mobile-main.mobile-main-trends .mobile-panel-trends.is-active {
+  .mobile-main.mobile-main-trends .mobile-panel-trends.is-active,
+  .mobile-main.mobile-main-recent .mobile-panel-recent.is-active {
     min-height: 100%;
   }
 
@@ -1043,8 +1147,10 @@ button:hover {
     padding: 0.6rem 0.65rem;
   }
 
-  .recent-list-scroll {
-    max-height: min(48vh, 460px);
+  .mobile-panel-recent.is-active .recent-list-scroll {
+    max-height: none;
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   .profile-friend-search {

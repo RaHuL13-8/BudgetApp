@@ -402,6 +402,7 @@ function mapExpense(expenseId: string, data: Record<string, unknown>): Expense {
     categoryId: typeof data.categoryId === 'string' ? data.categoryId : '',
     categoryName: typeof data.categoryName === 'string' ? data.categoryName : 'Uncategorized',
     subcategoryName: typeof data.subcategoryName === 'string' ? normalizeLabel(data.subcategoryName) : '',
+    isBigTicket: typeof data.isBigTicket === 'boolean' ? data.isBigTicket : false,
     amount: typeof data.amount === 'number' ? data.amount : Number(data.amount ?? 0),
     date: typeof data.date === 'string' ? data.date : new Date().toISOString().slice(0, 10),
     createdAt: toIso(data.createdAt)
@@ -451,6 +452,7 @@ export async function createExpense(userId: string, payload: CreateExpensePayloa
     categoryId: payload.categoryId,
     categoryName,
     subcategoryName,
+    isBigTicket: Boolean(payload.isBigTicket),
     date: payload.date,
     description: payload.description?.trim() ?? '',
     createdAt: serverTimestamp()

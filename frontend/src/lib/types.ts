@@ -12,6 +12,7 @@ export type Expense = {
   categoryId: string;
   categoryName: string;
   subcategoryName: string;
+  isBigTicket: boolean;
   amount: number;
   date: string;
   createdAt: string;
@@ -67,6 +68,7 @@ export type CreateExpensePayload = {
   date: string;
   description?: string;
   subcategoryName: string;
+  isBigTicket?: boolean;
 };
 
 export type CreateCategoryPayload = {

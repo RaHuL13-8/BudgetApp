@@ -247,11 +247,16 @@ function filterExpensesByPresetRange(expenses: Expense[], range: 'daily' | 'mont
   });
 }
 
+function matchesExpenseMode(expense: Expense, showBigTicket: boolean): boolean {
+  return showBigTicket ? expense.isBigTicket : !expense.isBigTicket;
+}
+
 function buildTrendData(
   expenses: Expense[],
   range: 'daily' | 'monthly' | 'yearly',
   selectedCategoryId: string,
   selectedSubcategory: string,
+  showBigTicket: boolean,
   startDate: string,
   endDate: string
 ): Array<{ label: string; amount: number }> {
@@ -267,7 +272,7 @@ function buildTrendData(
     const subcategoryMatch =
       selectedSubcategory === 'all' ||
       normalizeSubcategory(expense.subcategoryName) === selectedSubcategory;
-    return categoryMatch && subcategoryMatch;
+    return categoryMatch && subcategoryMatch && matchesExpenseMode(expense, showBigTicket);
   });
 
   const normalizedEnd = endDate
@@ -361,6 +366,7 @@ export default function App() {
   const [trendCategoryId, setTrendCategoryId] = useState('all');
   const [trendSubcategory, setTrendSubcategory] = useState('all');
   const [trendSubcategoryOptions, setTrendSubcategoryOptions] = useState<Subcategory[]>([]);
+  const [trendShowBigTicket, setTrendShowBigTicket] = useState(false);
   const [mobileTab, setMobileTab] = useState<MobileTab>('add');
   const [mobileTrendView, setMobileTrendView] = useState<'trend' | 'split'>('trend');
   const [mobileFriendView, setMobileFriendView] = useState<'overview' | 'category' | 'recent'>('overview');
@@ -373,6 +379,7 @@ export default function App() {
   const [amount, setAmount] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [subcategoryName, setSubcategoryName] = useState('');
+  const [isBigTicketExpense, setIsBigTicketExpense] = useState(false);
   const [subcategoryOptions, setSubcategoryOptions] = useState<Subcategory[]>([]);
   const [expenseDate, setExpenseDate] = useState(todayISO());
   const [description, setDescription] = useState('');
@@ -398,6 +405,7 @@ export default function App() {
   const [friendFilterMonth, setFriendFilterMonth] = useState('all');
   const [friendFilterCategoryName, setFriendFilterCategoryName] = useState('all');
   const [friendFilterSubcategory, setFriendFilterSubcategory] = useState('all');
+  const [friendShowBigTicket, setFriendShowBigTicket] = useState(false);
   const [friendFilterStartDate, setFriendFilterStartDate] = useState('');
   const [friendFilterEndDate, setFriendFilterEndDate] = useState('');
   const [includeMeInFriendComparison, setIncludeMeInFriendComparison] = useState(true);
@@ -472,8 +480,10 @@ export default function App() {
     setTrendEndDate(defaultTrendRange.end);
     setTrendCategoryId('all');
     setTrendSubcategory('all');
+    setTrendShowBigTicket(false);
     setTrendSubcategoryOptions([]);
     setSubcategoryName('');
+    setIsBigTicketExpense(false);
     setSubcategoryOptions([]);
     setRecentSubcategoryOptions([]);
     setFriendSearchTerm('');
@@ -483,6 +493,7 @@ export default function App() {
     setFriendFilterMonth('all');
     setFriendFilterCategoryName('all');
     setFriendFilterSubcategory('all');
+    setFriendShowBigTicket(false);
     setFriendFilterStartDate('');
     setFriendFilterEndDate('');
     setIncludeMeInFriendComparison(true);
@@ -523,7 +534,8 @@ export default function App() {
       const categoryMatch = trendCategoryId === 'all' || expense.categoryId === trendCategoryId;
       const subcategoryMatch =
         trendSubcategory === 'all' || normalizeSubcategory(expense.subcategoryName) === trendSubcategory;
-      return categoryMatch && subcategoryMatch;
+      const modeMatch = matchesExpenseMode(expense, trendShowBigTicket);
+      return categoryMatch && subcategoryMatch && modeMatch;
     });
 
     const now = new Date();
@@ -546,6 +558,7 @@ export default function App() {
     expenses,
     trendCategoryId,
     trendSubcategory,
+    trendShowBigTicket,
     trendStartDate,
     trendEndDate,
     range,
@@ -662,12 +675,21 @@ export default function App() {
     if (isTrendRangeInvalid) {
       return [];
     }
-    return buildTrendData(expenses, range, trendCategoryId, trendSubcategory, trendStartDate, trendEndDate);
+    return buildTrendData(
+      expenses,
+      range,
+      trendCategoryId,
+      trendSubcategory,
+      trendShowBigTicket,
+      trendStartDate,
+      trendEndDate
+    );
   }, [
     expenses,
     range,
     trendCategoryId,
     trendSubcategory,
+    trendShowBigTicket,
     trendStartDate,
     trendEndDate,
     isTrendRangeInvalid
@@ -690,6 +712,7 @@ export default function App() {
       trendSubcategory
     );
   }, [trendSubcategory, trendSubcategoryOptions]);
+  const trendExpenseModeLabel = trendShowBigTicket ? 'Big-Ticket' : 'Daily Essentials';
 
   const categoryNameById = useMemo(
     () => new Map(categories.map((category) => [category.id, category.name])),
@@ -878,14 +901,16 @@ export default function App() {
       const subcategoryMatch =
         friendFilterSubcategory === 'all' ||
         normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
-      return yearMatch && monthMatch && categoryMatch && subcategoryMatch;
+      const modeMatch = matchesExpenseMode(expense, friendShowBigTicket);
+      return yearMatch && monthMatch && categoryMatch && subcategoryMatch && modeMatch;
     });
   }, [
     friendAllExpenses,
     friendFilterYear,
     friendFilterMonth,
     friendFilterCategoryName,
-    friendFilterSubcategory
+    friendFilterSubcategory,
+    friendShowBigTicket
   ]);
 
   const friendDateBounds = useMemo(() => deriveDateBounds(friendBaseExpenses), [friendBaseExpenses]);
@@ -912,9 +937,10 @@ export default function App() {
         const subcategoryMatch =
           friendFilterSubcategory === 'all' ||
           normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
+        const modeMatch = matchesExpenseMode(expense, friendShowBigTicket);
         const startMatch = expense.date >= effectiveFriendStartDate;
         const endMatch = expense.date <= effectiveFriendEndDate;
-        return yearMatch && monthMatch && categoryMatch && subcategoryMatch && startMatch && endMatch;
+        return yearMatch && monthMatch && categoryMatch && subcategoryMatch && modeMatch && startMatch && endMatch;
       });
 
       return {
@@ -931,6 +957,7 @@ export default function App() {
     friendFilterMonth,
     friendFilterCategoryName,
     friendFilterSubcategory,
+    friendShowBigTicket,
     effectiveFriendStartDate,
     effectiveFriendEndDate,
     isFriendRangeInvalid
@@ -1029,13 +1056,14 @@ export default function App() {
 
   const friendCombinedCategorySplitData = useMemo(() => {
     if (isFriendRangeInvalid || friendCombinedExpenses.length === 0) {
-      return [] as Array<{ name: string; value: number; color: string }>;
+      return [] as Array<{ name: string; value: number; color: string; percentage: number }>;
     }
 
     const totals = new Map<string, number>();
     for (const expense of friendCombinedExpenses) {
       totals.set(expense.categoryName, (totals.get(expense.categoryName) ?? 0) + expense.amount);
     }
+    const grandTotal = Array.from(totals.values()).reduce((sum, value) => sum + value, 0);
 
     const colorByCategory = new Map(categories.map((category) => [category.name, category.color]));
 
@@ -1043,10 +1071,100 @@ export default function App() {
       .map(([name, value]) => ({
         name,
         value: Number(value.toFixed(2)),
+        percentage: grandTotal > 0 ? (value / grandTotal) * 100 : 0,
         color: colorByCategory.get(name) ?? subcategoryColor(name)
       }))
       .sort((left, right) => right.value - left.value);
   }, [friendCombinedExpenses, categories, isFriendRangeInvalid]);
+
+  const friendCombinedSubcategorySplitData = useMemo(() => {
+    if (isFriendRangeInvalid || friendCombinedExpenses.length === 0 || friendCombinedCategorySplitData.length === 0) {
+      return [] as Array<{
+        name: string;
+        categoryName: string;
+        subcategoryName: string;
+        value: number;
+        color: string;
+        percentage: number;
+        categoryPercentage: number;
+      }>;
+    }
+
+    const categoryColorByName = new Map(categories.map((category) => [category.name, category.color]));
+    const categoryTotals = new Map(friendCombinedCategorySplitData.map((entry) => [entry.name, entry.value]));
+    const totals = new Map<string, { categoryName: string; subcategoryName: string; value: number }>();
+
+    for (const expense of friendCombinedExpenses) {
+      const category = expense.categoryName;
+      const subcategory = expense.subcategoryName.trim() || 'Other';
+      const key = `${category}::${normalizeSubcategory(subcategory)}`;
+      const existing = totals.get(key);
+
+      if (existing) {
+        existing.value += expense.amount;
+        totals.set(key, existing);
+      } else {
+        totals.set(key, {
+          categoryName: category,
+          subcategoryName: subcategory,
+          value: expense.amount
+        });
+      }
+    }
+
+    const grandTotal = friendCombinedCategorySplitData.reduce((sum, item) => sum + item.value, 0);
+    const groupedByCategory = new Map<string, Array<{ categoryName: string; subcategoryName: string; value: number }>>();
+
+    for (const item of totals.values()) {
+      const list = groupedByCategory.get(item.categoryName) ?? [];
+      list.push(item);
+      groupedByCategory.set(item.categoryName, list);
+    }
+
+    const categoryRank = new Map(friendCombinedCategorySplitData.map((category, index) => [category.name, index]));
+    const orderedCategories = Array.from(groupedByCategory.keys()).sort((left, right) => {
+      const leftRank = categoryRank.get(left) ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = categoryRank.get(right) ?? Number.MAX_SAFE_INTEGER;
+      return leftRank - rightRank || left.localeCompare(right);
+    });
+
+    return orderedCategories.flatMap((categoryName) => {
+      const items = [...(groupedByCategory.get(categoryName) ?? [])].sort(
+        (left, right) => right.value - left.value || left.subcategoryName.localeCompare(right.subcategoryName)
+      );
+      const baseColor = categoryColorByName.get(categoryName);
+      const categoryTotal = categoryTotals.get(categoryName) ?? 0;
+
+      return items.map((item, index) => ({
+        name: `${categoryName} / ${item.subcategoryName}`,
+        categoryName,
+        subcategoryName: item.subcategoryName,
+        value: Number(item.value.toFixed(2)),
+        color: subcategoryGradientColorFromCategory(
+          baseColor,
+          `${categoryName}:${normalizeSubcategory(item.subcategoryName)}`,
+          index,
+          items.length
+        ),
+        percentage: grandTotal > 0 ? (item.value / grandTotal) * 100 : 0,
+        categoryPercentage: categoryTotal > 0 ? (item.value / categoryTotal) * 100 : 0
+      }));
+    });
+  }, [friendCombinedExpenses, friendCombinedCategorySplitData, categories, isFriendRangeInvalid]);
+
+  const friendCombinedSplitLegendGroups = useMemo(() => {
+    const subByCategory = new Map<string, typeof friendCombinedSubcategorySplitData>();
+    for (const sub of friendCombinedSubcategorySplitData) {
+      const list = subByCategory.get(sub.categoryName) ?? [];
+      list.push(sub);
+      subByCategory.set(sub.categoryName, list);
+    }
+
+    return friendCombinedCategorySplitData.map((category) => ({
+      ...category,
+      subcategories: (subByCategory.get(category.name) ?? []).sort((left, right) => right.value - left.value)
+    }));
+  }, [friendCombinedCategorySplitData, friendCombinedSubcategorySplitData]);
 
   const friendAdvancedInsights = useMemo(() => {
     if (friendInsightsForComparison.length === 0) {
@@ -1199,6 +1317,7 @@ export default function App() {
       segments.push(subcategoryLabel);
     }
     segments.push(`${effectiveFriendStartDate} to ${effectiveFriendEndDate}`);
+    segments.push(friendShowBigTicket ? 'Big-Ticket view' : 'Daily Essentials view');
     segments.push(includeMeInFriendComparison ? 'Including me' : 'Friends only');
     return segments.join(' • ');
   }, [
@@ -1210,6 +1329,7 @@ export default function App() {
     friendFilterSubcategories,
     effectiveFriendStartDate,
     effectiveFriendEndDate,
+    friendShowBigTicket,
     includeMeInFriendComparison
   ]);
 
@@ -1378,7 +1498,7 @@ export default function App() {
 
   useEffect(() => {
     setMobileTrendView('trend');
-  }, [range, trendCategoryId, trendSubcategory, trendStartDate, trendEndDate]);
+  }, [range, trendCategoryId, trendSubcategory, trendShowBigTicket, trendStartDate, trendEndDate]);
 
   useEffect(() => {
     const anyModalOpen =
@@ -1429,12 +1549,14 @@ export default function App() {
         categoryId,
         date: expenseDate,
         description: description.trim(),
-        subcategoryName: subcategoryName.trim()
+        subcategoryName: subcategoryName.trim(),
+        isBigTicket: isBigTicketExpense
       });
 
       setAmount('');
       setDescription('');
       setSubcategoryName('');
+      setIsBigTicketExpense(false);
       await loadData();
     } catch (requestError) {
       setError(readErrorMessage(requestError, 'Failed to add expense.'));
@@ -2331,6 +2453,17 @@ export default function App() {
                 />
               </label>
 
+              <label className="fancy-toggle">
+                <input
+                  className="fancy-toggle-input"
+                  type="checkbox"
+                  checked={isBigTicketExpense}
+                  onChange={(event) => setIsBigTicketExpense(event.target.checked)}
+                />
+                <span className="fancy-toggle-indicator" aria-hidden="true" />
+                <span>Big-Ticket Expense</span>
+              </label>
+
               <button className="primary" type="submit" disabled={submitting || loading || categories.length === 0}>
                 {submitting ? 'Saving...' : 'Add Expense'}
               </button>
@@ -2352,6 +2485,20 @@ export default function App() {
           >
             <div className="panel-head">
               <h3>Insights & Trends</h3>
+              <span>Switch expense type instantly.</span>
+            </div>
+
+            <div className="panel-top-row">
+              <label className="fancy-toggle">
+                <input
+                  className="fancy-toggle-input"
+                  type="checkbox"
+                  checked={trendShowBigTicket}
+                  onChange={(event) => setTrendShowBigTicket(event.target.checked)}
+                />
+                <span className="fancy-toggle-indicator" aria-hidden="true" />
+                <span>Big-Ticket Expense</span>
+              </label>
               <button
                 type="button"
                 className="secondary filter-trigger-btn"
@@ -2386,7 +2533,7 @@ export default function App() {
               >
                 <h4>Spending Trend</h4>
                 <p className="muted trend-note">
-                  {selectedTrendCategoryName} • {selectedTrendSubcategoryName}
+                  {selectedTrendCategoryName} • {selectedTrendSubcategoryName} • {trendExpenseModeLabel}
                 </p>
                 <div className="chart-box">
                   {isTrendRangeInvalid ? (
@@ -2598,6 +2745,19 @@ export default function App() {
               <h3>Friends Comparison</h3>
               <span>Compare spend, categories, and patterns with filters.</span>
             </div>
+          </div>
+
+          <div className="panel-top-row">
+            <label className="fancy-toggle">
+              <input
+                className="fancy-toggle-input"
+                type="checkbox"
+                checked={friendShowBigTicket}
+                onChange={(event) => setFriendShowBigTicket(event.target.checked)}
+              />
+              <span className="fancy-toggle-indicator" aria-hidden="true" />
+              <span>Big-Ticket Expense</span>
+            </label>
             <button
               type="button"
               className="secondary filter-trigger-btn"
@@ -2713,7 +2873,7 @@ export default function App() {
             </div>
 
             <div className="friend-section">
-              <h4>Combined Category Bifurcation</h4>
+              <h4>Combined Category + Subcategory Bifurcation</h4>
               <div className="chart-box friend-chart-box">
                 {isFriendRangeInvalid ? (
                   <p className="muted">Fix the date range to view category bifurcation.</p>
@@ -2726,26 +2886,87 @@ export default function App() {
                         data={friendCombinedCategorySplitData}
                         dataKey="value"
                         nameKey="name"
-                        innerRadius={58}
-                        outerRadius={88}
+                        innerRadius={40}
+                        outerRadius={62}
                       >
                         {friendCombinedCategorySplitData.map((item) => (
                           <Cell key={item.name} fill={item.color} />
                         ))}
                       </Pie>
-                      <Tooltip formatter={(value: number) => currency.format(value)} />
+                      {friendCombinedSubcategorySplitData.length > 0 ? (
+                        <Pie
+                          data={friendCombinedSubcategorySplitData}
+                          dataKey="value"
+                          nameKey="name"
+                          innerRadius={68}
+                          outerRadius={90}
+                        >
+                          {friendCombinedSubcategorySplitData.map((item) => (
+                            <Cell key={item.name} fill={item.color} />
+                          ))}
+                        </Pie>
+                      ) : null}
+                      <Tooltip
+                        formatter={(
+                          value: number,
+                          _name: string,
+                          payload: {
+                            payload?: {
+                              percentage?: number;
+                              categoryPercentage?: number;
+                              categoryName?: string;
+                              subcategoryName?: string;
+                              name?: string;
+                            };
+                          }
+                        ) => {
+                          const item = payload?.payload;
+                          if (item?.subcategoryName) {
+                            return [
+                              `${currency.format(value)} (${(item.percentage ?? 0).toFixed(1)}% of total, ${(item.categoryPercentage ?? 0).toFixed(1)}% of ${item.categoryName})`,
+                              item.subcategoryName
+                            ];
+                          }
+
+                          return [
+                            `${currency.format(value)} (${(item?.percentage ?? 0).toFixed(1)}% of total)`,
+                            item?.name ?? 'Category'
+                          ];
+                        }}
+                      />
                     </PieChart>
                   </ResponsiveContainer>
                 )}
               </div>
               {friendCombinedCategorySplitData.length > 0 ? (
-                <div className="legend">
-                  {friendCombinedCategorySplitData.map((item) => (
-                    <div className="legend-item" key={item.name}>
-                      <span style={{ backgroundColor: item.color }} />
-                      <p>
-                        {item.name} <strong>{currency.format(item.value)}</strong>
-                      </p>
+                <div className="split-hier-legend">
+                  {friendCombinedSplitLegendGroups.map((group) => (
+                    <div className="split-hier-category" key={group.name}>
+                      <div className="legend-item">
+                        <span style={{ backgroundColor: group.color }} />
+                        <p>
+                          {group.name}{' '}
+                          <strong>
+                            {currency.format(group.value)} ({group.percentage.toFixed(1)}%)
+                          </strong>
+                        </p>
+                      </div>
+                      {group.subcategories.length > 0 ? (
+                        <div className="split-hier-sub-list">
+                          {group.subcategories.map((sub) => (
+                            <div className="split-hier-sub-item" key={sub.name}>
+                              <span style={{ backgroundColor: sub.color }} />
+                              <p>
+                                {sub.subcategoryName}{' '}
+                                <strong>
+                                  {currency.format(sub.value)} ({sub.percentage.toFixed(1)}% total,{' '}
+                                  {sub.categoryPercentage.toFixed(1)}% in {group.name})
+                                </strong>
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
