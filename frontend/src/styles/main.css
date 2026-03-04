@@ -340,10 +340,22 @@ button:hover {
   margin-bottom: 0.8rem;
 }
 
-.panel-head span {
+.panel-head > span,
+.panel-head > div > span {
   color: var(--muted);
   font-size: 0.84rem;
   text-align: right;
+}
+
+.add-panel-head {
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.add-head-note {
+  margin: 0 0 0.65rem;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .expense-form,
@@ -1072,7 +1084,8 @@ button:hover {
     font-size: 1.03rem;
   }
 
-  .panel-head span {
+  .panel-head > span,
+  .panel-head > div > span {
     font-size: 0.78rem;
   }
 
@@ -1240,7 +1253,8 @@ button:hover {
     align-items: center;
   }
 
-  .panel-head span {
+  .panel-head > span,
+  .panel-head > div > span {
     display: none;
   }
 

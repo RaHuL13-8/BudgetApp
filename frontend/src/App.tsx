@@ -2351,10 +2351,20 @@ export default function App() {
           <article
             className={mobileTab === 'add' ? 'panel glass mobile-panel-add is-active' : 'panel glass mobile-panel-add'}
           >
-            <div className="panel-head">
+            <div className="panel-head add-panel-head">
               <h3>Add Expense</h3>
-              <span>Every entry sharpens your money decisions.</span>
+              <label className="fancy-toggle">
+                <input
+                  className="fancy-toggle-input"
+                  type="checkbox"
+                  checked={isBigTicketExpense}
+                  onChange={(event) => setIsBigTicketExpense(event.target.checked)}
+                />
+                <span className="fancy-toggle-indicator" aria-hidden="true" />
+                <span>Big-Ticket Expense</span>
+              </label>
             </div>
+            <p className="add-head-note">Every entry sharpens your money decisions.</p>
 
             <form className="expense-form" onSubmit={onAddExpense}>
               <div className="amount-date-row">
@@ -2451,17 +2461,6 @@ export default function App() {
                   onChange={(event) => setDescription(event.target.value)}
                   placeholder="Dinner with team"
                 />
-              </label>
-
-              <label className="fancy-toggle">
-                <input
-                  className="fancy-toggle-input"
-                  type="checkbox"
-                  checked={isBigTicketExpense}
-                  onChange={(event) => setIsBigTicketExpense(event.target.checked)}
-                />
-                <span className="fancy-toggle-indicator" aria-hidden="true" />
-                <span>Big-Ticket Expense</span>
               </label>
 
               <button className="primary" type="submit" disabled={submitting || loading || categories.length === 0}>
