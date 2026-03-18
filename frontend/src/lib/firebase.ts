@@ -9,9 +9,30 @@ import {
 } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
+function resolveAuthDomain(configuredAuthDomain: string): string {
+  if (typeof window === 'undefined') {
+    return configuredAuthDomain;
+  }
+
+  const { hostname, protocol } = window.location;
+  const isLocalHost =
+    hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname.endsWith('.local');
+
+  if (isLocalHost || protocol !== 'https:' || !configuredAuthDomain) {
+    return configuredAuthDomain;
+  }
+
+  const shouldUseCurrentHost =
+    configuredAuthDomain.endsWith('.firebaseapp.com') &&
+    hostname !== configuredAuthDomain &&
+    (hostname.endsWith('.web.app') || !hostname.endsWith('.firebaseapp.com'));
+
+  return shouldUseCurrentHost ? hostname : configuredAuthDomain;
+}
+
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY ?? '',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? '',
+  authDomain: resolveAuthDomain(import.meta.env.VITE_FIREBASE_AUTH_DOMAIN ?? ''),
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID ?? '',
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ?? '',
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID ?? '',
