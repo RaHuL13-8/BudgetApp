@@ -298,6 +298,19 @@ function keepValidSelections(selected: string[], validValues: string[]): string[
   return selected.filter((item) => validSet.has(item));
 }
 
+function isIosStandaloneMode(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const isStandalone =
+    (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches) ||
+    Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
+  const isIosDevice = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
+
+  return isStandalone && isIosDevice;
+}
+
 type FilterChipOption = {
   value: string;
   label: string;
@@ -1885,6 +1898,11 @@ export default function App() {
   }
 
   async function onSignIn() {
+    if (isIosStandaloneMode()) {
+      setError('Google sign-in is not reliable in iPhone/iPad Home Screen mode yet. Open BudgetPulse in Safari and sign in there.');
+      return;
+    }
+
     setAuthBusy(true);
     setError('');
 
@@ -2044,6 +2062,7 @@ export default function App() {
     userName || authUser?.displayName?.trim() || authUser?.email?.split('@')[0] || 'User';
   const heroUserLabel = userName ? `@${userName}` : authUser?.email ?? 'Sign in to continue';
   const profileInitial = (userName || visibleUserName).trim().charAt(0).toUpperCase() || 'U';
+  const iosStandaloneAuthBlocked = isIosStandaloneMode() && !authUser;
 
   if (!authReady) {
     return (
@@ -2068,10 +2087,12 @@ export default function App() {
           <p className="eyebrow app-title">BudgetPulse</p>
           <h1>Sign in to continue</h1>
           <p className="muted">
-            Use the Google account linked to your profile so your expenses, categories, and universe load correctly.
+            {iosStandaloneAuthBlocked
+              ? 'Use Safari on iPhone/iPad to sign in. Home Screen mode does not restore Google sign-in reliably yet.'
+              : 'Use the Google account linked to your profile so your expenses, categories, and universe load correctly.'}
           </p>
           <button type="button" className="primary auth-action-btn" onClick={onSignIn} disabled={authBusy}>
-            {authBusy ? 'Opening Google...' : 'Continue with Google'}
+            {authBusy ? 'Opening Google...' : iosStandaloneAuthBlocked ? 'Use Safari to Sign In' : 'Continue with Google'}
           </button>
         </section>
         {error ? <p className="error-banner">{error}</p> : null}
