@@ -1,6 +1,6 @@
 # BudgetPulse Prototype (React + Firebase)
 
-Mobile-first budget web app for multi-user expense tracking with categories, trends, and friend comparisons.
+Mobile-first budget web app for multi-user expense tracking with categories, trends, and universe comparisons.
 
 ## Stack
 - Frontend: React + TypeScript + Vite + Recharts
@@ -16,8 +16,9 @@ Mobile-first budget web app for multi-user expense tracking with categories, tre
 6. View daily/monthly/yearly trend analytics and category split.
 7. Switch profile by username (no auth in this prototype).
 8. Enforce unique usernames (case-insensitive) when creating users.
-9. Search users and add/remove friends.
-10. Compare spending with friends (total spend chart, top category per person, and friend recents).
+9. Search users and add/remove people in your universe.
+10. Compare spending across your universe (total spend chart, top category per person, and recent universe activity).
+11. Sign in with Google and keep each BudgetPulse profile linked to an authenticated account.
 
 ## Project structure
 - `frontend/` React app (Firebase-only)
@@ -30,16 +31,26 @@ Mobile-first budget web app for multi-user expense tracking with categories, tre
 ## Firebase setup
 1. Create Firebase project.
 2. Enable Firestore database.
-3. In Firebase project settings, copy Web App config values.
-4. Set frontend env vars in `frontend/.env`:
+3. Enable Firebase Authentication and turn on the Google provider.
+4. In Firebase project settings, copy Web App config values.
+5. Set frontend env vars in `frontend/.env`:
    - `VITE_FIREBASE_API_KEY`
    - `VITE_FIREBASE_AUTH_DOMAIN`
    - `VITE_FIREBASE_PROJECT_ID`
    - `VITE_FIREBASE_STORAGE_BUCKET`
    - `VITE_FIREBASE_MESSAGING_SENDER_ID`
    - `VITE_FIREBASE_APP_ID`
+   - `VITE_LEGACY_GOOGLE_LINKS` for first-login linking of legacy usernames such as `rahul` and `sneha`
 
 Use `frontend/.env.example` as template.
+
+`VITE_LEGACY_GOOGLE_LINKS` format:
+`rahul=rahul@gmail.com,sneha=sneha@gmail.com`
+
+On first successful Google sign-in, the app will:
+- link matching legacy emails to the existing `users/{username}` document
+- keep all existing expenses/categories/universe connections under the same username document id
+- create a new username-based profile automatically for any other Google account
 
 ## Run frontend
 ```bash
@@ -65,5 +76,6 @@ Frontend runs on `http://localhost:5173`.
 No Java backend deployment is required for this Firebase-only version.
 
 ## Notes
-- This prototype has no authentication yet.
-- Add Firebase Auth + Firestore rules before production use.
+- The UI now requires Google sign-in, but you should still add Firestore rules before production use.
+- Existing data remains keyed by username in Firestore; auth is linked through `authLinks/{uid}`.
+- New subcategory suggestions are derived from the current user plus their universe, rather than a global registry.

@@ -1,4 +1,5 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
+import { getAuth, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
 const firebaseConfig = {
@@ -12,6 +13,7 @@ const firebaseConfig = {
 
 let firebaseApp: FirebaseApp | null = null;
 let firestoreDb: Firestore | null = null;
+let firebaseAuth: Auth | null = null;
 
 function missingFirebaseVars(): string[] {
   return Object.entries(firebaseConfig)
@@ -19,7 +21,7 @@ function missingFirebaseVars(): string[] {
     .map(([key]) => key);
 }
 
-export function getDb(): Firestore {
+export function getFirebaseApp(): FirebaseApp {
   const missingVars = missingFirebaseVars();
   if (missingVars.length > 0) {
     throw new Error(
@@ -32,9 +34,25 @@ export function getDb(): Firestore {
     firebaseApp = initializeApp(firebaseConfig);
   }
 
+  return firebaseApp;
+}
+
+export function getDb(): Firestore {
+  const app = getFirebaseApp();
+
   if (!firestoreDb) {
-    firestoreDb = getFirestore(firebaseApp);
+    firestoreDb = getFirestore(app);
   }
 
   return firestoreDb;
+}
+
+export function getFirebaseAuth(): Auth {
+  const app = getFirebaseApp();
+
+  if (!firebaseAuth) {
+    firebaseAuth = getAuth(app);
+  }
+
+  return firebaseAuth;
 }

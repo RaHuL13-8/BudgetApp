@@ -15,10 +15,12 @@ import {
   startAt,
   endAt,
   Timestamp,
+  Transaction,
   updateDoc,
   where,
   writeBatch
 } from 'firebase/firestore';
+import type { User as AuthUser } from 'firebase/auth';
 import { getDb } from './firebase';
 import type {
   Analytics,
@@ -47,6 +49,8 @@ const PREDEFINED_CATEGORIES: Array<{ id: string; name: string; color: string }> 
   { id: 'other', name: 'Other', color: '#64748B' }
 ];
 
+const LEGACY_GOOGLE_LINKS = parseLegacyGoogleLinks(import.meta.env.VITE_LEGACY_GOOGLE_LINKS);
+
 function normalizeUsername(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -57,6 +61,10 @@ function normalizeKey(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function authLinksCollection() {
+  return collection(getDb(), 'authLinks');
 }
 
 function normalizeLabel(value: string): string {
@@ -105,10 +113,6 @@ function expensesCollection(userId: string) {
   return collection(getDb(), 'users', userId, 'expenses');
 }
 
-function globalCategorySubcategoryRootCollection() {
-  return collection(getDb(), 'globalCategorySubcategories');
-}
-
 function subcategoriesCollectionForCategoryName(categoryName: string) {
   return collection(
     getDb(),
@@ -127,8 +131,190 @@ function mapUserProfile(userId: string, data: Record<string, unknown>): UserProf
     friends: Array.isArray(data.friends)
       ? data.friends.filter((friend): friend is string => typeof friend === 'string')
       : [],
+    authUid: typeof data.authUid === 'string' ? data.authUid : undefined,
+    authEmail: typeof data.authEmail === 'string' ? data.authEmail : undefined,
+    displayName: typeof data.displayName === 'string' ? data.displayName : undefined,
+    photoUrl: typeof data.photoUrl === 'string' ? data.photoUrl : undefined,
     createdAt: toIso(data.createdAt)
   };
+}
+
+function parseLegacyGoogleLinks(value: string | undefined): Map<string, string> {
+  const links = new Map<string, string>();
+
+  if (!value) {
+    return links;
+  }
+
+  for (const pair of value.split(',')) {
+    const trimmedPair = pair.trim();
+    if (!trimmedPair) {
+      continue;
+    }
+
+    const separator = trimmedPair.includes('=') ? '=' : ':';
+    const [usernameRaw, emailRaw] = trimmedPair.split(separator);
+    const username = normalizeUsername(usernameRaw ?? '');
+    const emailLower = (emailRaw ?? '').trim().toLowerCase();
+
+    if (!username || !emailLower) {
+      continue;
+    }
+
+    links.set(emailLower, username);
+  }
+
+  return links;
+}
+
+function normalizeEmail(value: string | null | undefined): string {
+  return value?.trim().toLowerCase() ?? '';
+}
+
+function sanitizeUsernameBase(value: string): string {
+  const collapsed = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  const base = collapsed || 'user';
+  const sliced = base.slice(0, 24);
+
+  if (sliced.length >= 3) {
+    return sliced;
+  }
+
+  return `${sliced}${'user'.slice(sliced.length, 3)}`;
+}
+
+function buildUsernameCandidates(authUser: AuthUser): string[] {
+  const emailLower = normalizeEmail(authUser.email);
+  const emailBase = sanitizeUsernameBase(emailLower.split('@')[0] ?? '');
+  const displayBase = sanitizeUsernameBase(authUser.displayName ?? '');
+  const candidates = new Set<string>([displayBase, emailBase, `user-${emailBase}`]);
+
+  return Array.from(candidates).filter(Boolean);
+}
+
+async function claimAvailableUsername(transaction: Transaction, authUser: AuthUser): Promise<string> {
+  const candidates = buildUsernameCandidates(authUser);
+
+  for (const candidate of candidates) {
+    for (let suffix = 0; suffix < 100; suffix += 1) {
+      const proposed = suffix === 0 ? candidate : `${candidate.slice(0, Math.max(0, 24 - String(suffix).length - 1))}-${suffix}`;
+      const userId = normalizeUsername(proposed);
+      const usernameRef = doc(usernamesCollection(), userId);
+      const usernameSnapshot = await transaction.get(usernameRef);
+
+      if (!usernameSnapshot.exists()) {
+        return userId;
+      }
+    }
+  }
+
+  throw new Error('Could not generate a unique username for this Google account.');
+}
+
+function buildAuthMetadata(authUser: AuthUser) {
+  return {
+    authUid: authUser.uid,
+    authEmail: normalizeEmail(authUser.email),
+    authProvider: 'google',
+    displayName: authUser.displayName?.trim() ?? '',
+    photoUrl: authUser.photoURL ?? '',
+    updatedAt: serverTimestamp(),
+    lastLoginAt: serverTimestamp()
+  };
+}
+
+async function createOrLinkUserForGoogleAccount(authUser: AuthUser): Promise<string> {
+  const emailLower = normalizeEmail(authUser.email);
+
+  if (!emailLower) {
+    throw new Error('Your Google account must have an email address before it can be linked.');
+  }
+
+  const authLinkRef = doc(authLinksCollection(), authUser.uid);
+
+  return runTransaction(getDb(), async (transaction) => {
+    const authLinkSnapshot = await transaction.get(authLinkRef);
+    const authMetadata = buildAuthMetadata(authUser);
+
+    if (authLinkSnapshot.exists()) {
+      const linkedUserId = typeof authLinkSnapshot.data().userId === 'string' ? authLinkSnapshot.data().userId : '';
+      if (!linkedUserId) {
+        throw new Error('This Google account is linked to an invalid BudgetPulse profile.');
+      }
+
+      transaction.set(
+        authLinkRef,
+        {
+          userId: linkedUserId,
+          emailLower,
+          ...authMetadata
+        },
+        { merge: true }
+      );
+      transaction.set(doc(usersCollection(), linkedUserId), authMetadata, { merge: true });
+      return linkedUserId;
+    }
+
+    const legacyUserId = LEGACY_GOOGLE_LINKS.get(emailLower);
+    if (legacyUserId) {
+      const legacyUserRef = doc(usersCollection(), legacyUserId);
+      const legacyUserSnapshot = await transaction.get(legacyUserRef);
+
+      if (!legacyUserSnapshot.exists()) {
+        throw new Error(`Legacy profile @${legacyUserId} was not found in Firestore.`);
+      }
+
+      const currentAuthUid = typeof legacyUserSnapshot.data().authUid === 'string' ? legacyUserSnapshot.data().authUid : '';
+      if (currentAuthUid && currentAuthUid !== authUser.uid) {
+        throw new Error(`@${legacyUserId} is already linked to another Google account.`);
+      }
+
+      transaction.set(
+        authLinkRef,
+        {
+          userId: legacyUserId,
+          emailLower,
+          linkedAt: serverTimestamp(),
+          ...authMetadata
+        },
+        { merge: true }
+      );
+      transaction.set(legacyUserRef, authMetadata, { merge: true });
+      return legacyUserId;
+    }
+
+    const userId = await claimAvailableUsername(transaction, authUser);
+    const usernameRef = doc(usernamesCollection(), userId);
+    const userRef = doc(usersCollection(), userId);
+
+    transaction.set(usernameRef, {
+      username: userId,
+      usernameLower: userId,
+      userId,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    transaction.set(userRef, {
+      username: userId,
+      usernameLower: userId,
+      friends: [],
+      createdAt: serverTimestamp(),
+      ...authMetadata
+    });
+    transaction.set(authLinkRef, {
+      userId,
+      emailLower,
+      linkedAt: serverTimestamp(),
+      ...authMetadata
+    });
+    return userId;
+  });
 }
 
 async function ensureUsernameIndex(profile: UserProfile): Promise<void> {
@@ -252,6 +438,12 @@ export async function ensureUserProfile(usernameInput: string): Promise<UserProf
   return createUser(username);
 }
 
+export async function ensureAuthenticatedUserProfile(authUser: AuthUser): Promise<UserProfile> {
+  const userId = await createOrLinkUserForGoogleAccount(authUser);
+  await ensureDefaultCategories(userId);
+  return fetchUserProfile(userId);
+}
+
 export async function searchUsers(searchTerm: string, currentUserId: string): Promise<UserSearchResult[]> {
   const term = searchTerm.trim().toLowerCase();
 
@@ -347,53 +539,6 @@ export async function fetchGlobalSubcategories(categoryName: string): Promise<Su
   });
 }
 
-async function ensureGlobalSubcategory(
-  categoryName: string,
-  subcategoryNameInput: string,
-  createdByUserId: string
-): Promise<string> {
-  const categoryLabel = normalizeLabel(categoryName);
-  const subcategoryLabel = normalizeLabel(subcategoryNameInput);
-
-  if (!categoryLabel || !subcategoryLabel) {
-    return '';
-  }
-
-  const subcategoryKey = normalizeKey(subcategoryLabel);
-  if (!subcategoryKey) {
-    return '';
-  }
-
-  const rootRef = doc(globalCategorySubcategoryRootCollection(), normalizeKey(categoryLabel));
-  const subcategoryRef = doc(subcategoriesCollectionForCategoryName(categoryLabel), subcategoryKey);
-
-  await Promise.all([
-    setDoc(
-      rootRef,
-      {
-        categoryName: categoryLabel,
-        categoryNameLower: normalizeLabelLower(categoryLabel),
-        updatedAt: serverTimestamp()
-      },
-      { merge: true }
-    ),
-    setDoc(
-      subcategoryRef,
-      {
-        name: subcategoryLabel,
-        nameLower: normalizeLabelLower(subcategoryLabel),
-        categoryName: categoryLabel,
-        categoryNameLower: normalizeLabelLower(categoryLabel),
-        createdBy: createdByUserId,
-        createdAt: serverTimestamp()
-      },
-      { merge: true }
-    )
-  ]);
-
-  return subcategoryLabel;
-}
-
 function mapExpense(expenseId: string, data: Record<string, unknown>): Expense {
   return {
     id: expenseId,
@@ -440,11 +585,7 @@ export async function createExpense(userId: string, payload: CreateExpensePayloa
 
   const categoryData = categorySnapshot.data();
   const categoryName = typeof categoryData.name === 'string' ? categoryData.name : 'Uncategorized';
-  const subcategoryName = await ensureGlobalSubcategory(
-    categoryName,
-    requestedSubcategoryName,
-    userId
-  );
+  const subcategoryName = requestedSubcategoryName;
 
   const expenseRef = await addDoc(expensesCollection(userId), {
     userId,
@@ -520,11 +661,11 @@ export async function addFriendByUsername(userId: string, friendUsername: string
   }
 
   if (friend.id === userId) {
-    throw new Error('You cannot add yourself as a friend.');
+    throw new Error('You cannot add yourself to your universe.');
   }
 
   if (owner.friends.includes(friend.id)) {
-    throw new Error('This user is already in your friends list.');
+    throw new Error('This user is already in your universe.');
   }
 
   await updateDoc(doc(usersCollection(), userId), {

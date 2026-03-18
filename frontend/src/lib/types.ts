@@ -41,6 +41,10 @@ export type UserProfile = {
   username: string;
   usernameLower: string;
   friends: string[];
+  authUid?: string;
+  authEmail?: string;
+  displayName?: string;
+  photoUrl?: string;
   createdAt: string;
 };
 

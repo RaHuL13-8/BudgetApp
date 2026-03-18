@@ -17,17 +17,15 @@ import {
   addFriendByUsername,
   createCategory,
   createExpense,
-  createUser,
   deleteExpense,
-  ensureUserProfile,
+  ensureAuthenticatedUserProfile,
   fetchCategories,
   fetchExpenses,
   fetchFriendInsights,
-  fetchGlobalSubcategories,
-  getUserByUsername,
   removeFriend,
   searchUsers
 } from './lib/api';
+import { observeAuthState, signInWithGoogle, signOutFromApp, type AuthUser } from './lib/auth';
 import type { Category, Expense, FriendInsight, Subcategory, UserSearchResult } from './lib/types';
 
 const currency = new Intl.NumberFormat('en-IN', {
@@ -36,13 +34,33 @@ const currency = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2
 });
 
-const USER_STORAGE_KEY = 'budget-user-id';
-const DEFAULT_USERNAME = 'demo_user_1';
 const FRIEND_SERIES_COLORS = ['#22C55E', '#38BDF8', '#F59E0B', '#A78BFA', '#FB7185', '#14B8A6', '#F97316'];
 
 type MobileTab = 'add' | 'trends' | 'recent' | 'friends';
 type FriendPreset = 'all' | 'month' | 'quarter' | 'ytd' | 'custom';
 const MOBILE_TAB_ORDER: MobileTab[] = ['add', 'trends', 'recent', 'friends'];
+const WORKSPACE_TAB_CONTENT: Record<MobileTab, { label: string; title: string; description: string }> = {
+  add: {
+    label: 'Add',
+    title: 'Add Expense',
+    description: 'Capture a new expense quickly, pick the right category, and keep your notes simple.'
+  },
+  trends: {
+    label: 'Trends',
+    title: 'Insights & Trends',
+    description: 'Use filters and charts to see where your money is going over time.'
+  },
+  recent: {
+    label: 'Recent',
+    title: 'Recent Expenses',
+    description: 'Review your latest entries, double-check details, and clean up mistakes fast.'
+  },
+  friends: {
+    label: 'Universe',
+    title: 'Universe',
+    description: 'See how your circle is spending, compare patterns, and keep shared context in one place.'
+  }
+};
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
@@ -237,6 +255,172 @@ function summarizeTopCategory(expenses: Expense[]): { name: string; amount: numb
   return top;
 }
 
+function buildSubcategoryOptionsFromExpenses(expenses: Expense[], categoryNames?: string[]): Subcategory[] {
+  const uniques = new Map<string, string>();
+  const activeCategoryNames = categoryNames && categoryNames.length > 0 ? new Set(categoryNames) : null;
+
+  for (const expense of expenses) {
+    if (activeCategoryNames && !activeCategoryNames.has(expense.categoryName)) {
+      continue;
+    }
+
+    const name = expense.subcategoryName.trim();
+    if (!name) {
+      continue;
+    }
+
+    const nameLower = normalizeSubcategory(name);
+    if (!uniques.has(nameLower)) {
+      uniques.set(nameLower, name);
+    }
+  }
+
+  return Array.from(uniques.entries())
+    .map(([nameLower, name]) => ({ id: nameLower, name, nameLower }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function matchesSelection(selected: string[], value: string): boolean {
+  return selected.length === 0 || selected.includes(value);
+}
+
+function toggleSelection(selected: string[], value: string): string[] {
+  return selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value];
+}
+
+function keepValidSelections(selected: string[], validValues: string[]): string[] {
+  if (selected.length === 0) {
+    return selected;
+  }
+
+  const validSet = new Set(validValues);
+  return selected.filter((item) => validSet.has(item));
+}
+
+type FilterChipOption = {
+  value: string;
+  label: string;
+  color?: string;
+};
+
+function buildColoredSubcategoryFilterOptions(
+  expenses: Expense[],
+  categoryColors: Map<string, string>,
+  activeCategoryNames: string[]
+): FilterChipOption[] {
+  if (activeCategoryNames.length === 0) {
+    return [];
+  }
+
+  const activeCategories = new Set(activeCategoryNames);
+  const subcategoryMeta = new Map<
+    string,
+    { label: string; winningCategory: string; winningAmount: number }
+  >();
+
+  for (const expense of expenses) {
+    if (!activeCategories.has(expense.categoryName)) {
+      continue;
+    }
+
+    const label = expense.subcategoryName.trim();
+    if (!label) {
+      continue;
+    }
+
+    const value = normalizeSubcategory(label);
+    const existing = subcategoryMeta.get(value);
+
+    if (!existing || expense.amount > existing.winningAmount) {
+      subcategoryMeta.set(value, {
+        label,
+        winningCategory: expense.categoryName,
+        winningAmount: expense.amount
+      });
+    }
+  }
+
+  return Array.from(subcategoryMeta.entries())
+    .map(([value, meta]) => {
+      const baseColor = categoryColors.get(meta.winningCategory);
+      return {
+        value,
+        label: meta.label,
+        color: baseColor
+          ? subcategoryGradientColorFromCategory(baseColor, `${meta.winningCategory}:${value}`, 0, 1)
+          : subcategoryColor(value)
+      };
+    })
+    .sort((left, right) => left.label.localeCompare(right.label));
+}
+
+type FilterChipFieldProps = {
+  label: string;
+  allLabel: string;
+  options: FilterChipOption[];
+  selectedValues: string[];
+  onToggle: (value: string) => void;
+  onClear: () => void;
+  emptyText?: string;
+};
+
+function FilterChipField({
+  label,
+  allLabel,
+  options,
+  selectedValues,
+  onToggle,
+  onClear,
+  emptyText = 'No options yet.'
+}: FilterChipFieldProps) {
+  return (
+    <div className="filter-chip-field">
+      <div className="filter-chip-field-head">
+        <label>{label}</label>
+        {selectedValues.length > 0 ? (
+          <button type="button" className="filter-chip-clear" onClick={onClear}>
+            Clear
+          </button>
+        ) : null}
+      </div>
+      <div className="filter-chip-group">
+        <button
+          type="button"
+          className={selectedValues.length === 0 ? 'chip active' : 'chip'}
+          onClick={onClear}
+        >
+          {allLabel}
+        </button>
+        {options.length > 0 ? (
+          options.map((option) => {
+            const selected = selectedValues.includes(option.value);
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={selected ? 'chip active' : 'chip'}
+                style={
+                  option.color
+                    ? {
+                        borderColor: option.color,
+                        backgroundColor: withHexAlpha(option.color, selected ? 'D9' : '22')
+                      }
+                    : undefined
+                }
+                onClick={() => onToggle(option.value)}
+              >
+                {option.label}
+              </button>
+            );
+          })
+        ) : (
+          <span className="filter-chip-empty">{emptyText}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function filterExpensesByPresetRange(expenses: Expense[], range: 'daily' | 'monthly' | 'yearly'): Expense[] {
   const endDate = new Date();
   const startDate = rangeWindowStart(range, endDate);
@@ -254,8 +438,8 @@ function matchesExpenseMode(expense: Expense, showBigTicket: boolean): boolean {
 function buildTrendData(
   expenses: Expense[],
   range: 'daily' | 'monthly' | 'yearly',
-  selectedCategoryId: string,
-  selectedSubcategory: string,
+  selectedCategoryIds: string[],
+  selectedSubcategories: string[],
   showBigTicket: boolean,
   startDate: string,
   endDate: string
@@ -268,10 +452,8 @@ function buildTrendData(
   const monthFmt = new Intl.DateTimeFormat('en-US', { month: 'short', year: '2-digit' });
 
   const filteredExpenses = expenses.filter((expense) => {
-    const categoryMatch = selectedCategoryId === 'all' || expense.categoryId === selectedCategoryId;
-    const subcategoryMatch =
-      selectedSubcategory === 'all' ||
-      normalizeSubcategory(expense.subcategoryName) === selectedSubcategory;
+    const categoryMatch = matchesSelection(selectedCategoryIds, expense.categoryId);
+    const subcategoryMatch = matchesSelection(selectedSubcategories, normalizeSubcategory(expense.subcategoryName));
     return categoryMatch && subcategoryMatch && matchesExpenseMode(expense, showBigTicket);
   });
 
@@ -353,18 +535,19 @@ function readErrorMessage(error: unknown, fallback: string): string {
 export default function App() {
   const initialTrendDateRange = getDefaultTrendDateRange('monthly');
 
-  const [userId, setUserId] = useState(() => localStorage.getItem(USER_STORAGE_KEY) ?? DEFAULT_USERNAME);
-  const [userName, setUserName] = useState(userId);
-  const [draftSwitchUsername, setDraftSwitchUsername] = useState(userId);
-  const [draftCreateUsername, setDraftCreateUsername] = useState('');
+  const [authReady, setAuthReady] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [userId, setUserId] = useState('');
+  const [userName, setUserName] = useState('');
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [friendInsights, setFriendInsights] = useState<FriendInsight[]>([]);
 
   const [range, setRange] = useState<'daily' | 'monthly' | 'yearly'>('monthly');
-  const [trendCategoryId, setTrendCategoryId] = useState('all');
-  const [trendSubcategory, setTrendSubcategory] = useState('all');
+  const [trendCategoryIds, setTrendCategoryIds] = useState<string[]>([]);
+  const [trendSubcategories, setTrendSubcategories] = useState<string[]>([]);
   const [trendSubcategoryOptions, setTrendSubcategoryOptions] = useState<Subcategory[]>([]);
   const [trendShowBigTicket, setTrendShowBigTicket] = useState(false);
   const [mobileTab, setMobileTab] = useState<MobileTab>('add');
@@ -388,10 +571,10 @@ export default function App() {
   const [newCategoryName, setNewCategoryName] = useState('');
   const [newCategoryColor, setNewCategoryColor] = useState('#0EA5E9');
 
-  const [selectedExpenseYear, setSelectedExpenseYear] = useState('all');
-  const [selectedExpenseMonth, setSelectedExpenseMonth] = useState('all');
-  const [selectedExpenseCategoryId, setSelectedExpenseCategoryId] = useState('all');
-  const [selectedExpenseSubcategory, setSelectedExpenseSubcategory] = useState('all');
+  const [selectedExpenseYears, setSelectedExpenseYears] = useState<string[]>([]);
+  const [selectedExpenseMonths, setSelectedExpenseMonths] = useState<string[]>([]);
+  const [selectedExpenseCategoryIds, setSelectedExpenseCategoryIds] = useState<string[]>([]);
+  const [selectedExpenseSubcategories, setSelectedExpenseSubcategories] = useState<string[]>([]);
   const [recentSubcategoryOptions, setRecentSubcategoryOptions] = useState<Subcategory[]>([]);
   const [recentStartDate, setRecentStartDate] = useState('');
   const [recentEndDate, setRecentEndDate] = useState('');
@@ -401,10 +584,10 @@ export default function App() {
   const [friendSearchTerm, setFriendSearchTerm] = useState('');
   const [friendSearchResults, setFriendSearchResults] = useState<UserSearchResult[]>([]);
   const [friendFilterPreset, setFriendFilterPreset] = useState<FriendPreset>('all');
-  const [friendFilterYear, setFriendFilterYear] = useState('all');
-  const [friendFilterMonth, setFriendFilterMonth] = useState('all');
-  const [friendFilterCategoryName, setFriendFilterCategoryName] = useState('all');
-  const [friendFilterSubcategory, setFriendFilterSubcategory] = useState('all');
+  const [friendFilterYears, setFriendFilterYears] = useState<string[]>([]);
+  const [friendFilterMonths, setFriendFilterMonths] = useState<string[]>([]);
+  const [friendFilterCategoryNames, setFriendFilterCategoryNames] = useState<string[]>([]);
+  const [friendFilterSubcategories, setFriendFilterSubcategories] = useState<string[]>([]);
   const [friendShowBigTicket, setFriendShowBigTicket] = useState(false);
   const [friendFilterStartDate, setFriendFilterStartDate] = useState('');
   const [friendFilterEndDate, setFriendFilterEndDate] = useState('');
@@ -413,7 +596,6 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [searchingFriends, setSearchingFriends] = useState(false);
-  const [managingProfile, setManagingProfile] = useState(false);
   const [addingFriendUsername, setAddingFriendUsername] = useState('');
   const [removingFriendId, setRemovingFriendId] = useState('');
   const [deletingExpenseId, setDeletingExpenseId] = useState('');
@@ -421,7 +603,21 @@ export default function App() {
   const mobileTouchStartRef = useRef<{ x: number; y: number } | null>(null);
   const hasTabRefreshInitializedRef = useRef(false);
 
+  useEffect(() => {
+    const unsubscribe = observeAuthState((nextUser) => {
+      setAuthUser(nextUser);
+      setAuthReady(true);
+    });
+
+    return unsubscribe;
+  }, []);
+
   const loadData = useCallback(async (options?: { silent?: boolean }) => {
+    if (!authUser) {
+      setLoading(false);
+      return;
+    }
+
     const silent = options?.silent ?? false;
     if (!silent) {
       setLoading(true);
@@ -429,11 +625,10 @@ export default function App() {
     setError('');
 
     try {
-      const profile = await ensureUserProfile(userId);
+      const profile = await ensureAuthenticatedUserProfile(authUser);
 
       if (profile.id !== userId) {
         setUserId(profile.id);
-        return;
       }
 
       const [categoryData, expenseData, friendData] = await Promise.all([
@@ -464,22 +659,24 @@ export default function App() {
         setLoading(false);
       }
     }
-  }, [userId]);
+  }, [authUser, userId]);
 
   useEffect(() => {
-    localStorage.setItem(USER_STORAGE_KEY, userId);
-    setDraftSwitchUsername(userId);
-    setSelectedExpenseYear('all');
-    setSelectedExpenseMonth('all');
-    setSelectedExpenseCategoryId('all');
-    setSelectedExpenseSubcategory('all');
+    if (!userId) {
+      return;
+    }
+
+    setSelectedExpenseYears([]);
+    setSelectedExpenseMonths([]);
+    setSelectedExpenseCategoryIds([]);
+    setSelectedExpenseSubcategories([]);
     setRecentStartDate('');
     setRecentEndDate('');
     const defaultTrendRange = getDefaultTrendDateRange(range);
     setTrendStartDate(defaultTrendRange.start);
     setTrendEndDate(defaultTrendRange.end);
-    setTrendCategoryId('all');
-    setTrendSubcategory('all');
+    setTrendCategoryIds([]);
+    setTrendSubcategories([]);
     setTrendShowBigTicket(false);
     setTrendSubcategoryOptions([]);
     setSubcategoryName('');
@@ -489,10 +686,10 @@ export default function App() {
     setFriendSearchTerm('');
     setFriendSearchResults([]);
     setFriendFilterPreset('all');
-    setFriendFilterYear('all');
-    setFriendFilterMonth('all');
-    setFriendFilterCategoryName('all');
-    setFriendFilterSubcategory('all');
+    setFriendFilterYears([]);
+    setFriendFilterMonths([]);
+    setFriendFilterCategoryNames([]);
+    setFriendFilterSubcategories([]);
     setFriendShowBigTicket(false);
     setFriendFilterStartDate('');
     setFriendFilterEndDate('');
@@ -504,17 +701,35 @@ export default function App() {
   }, [userId]);
 
   useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
+    if (!authUser) {
+      setLoading(false);
+      setUserId('');
+      setUserName('');
+      setCategories([]);
+      setExpenses([]);
+      setFriendInsights([]);
+      return;
+    }
+
     void loadData();
-  }, [loadData]);
+  }, [authReady, authUser, loadData]);
 
   useEffect(() => {
+    if (!authUser) {
+      return;
+    }
+
     if (!hasTabRefreshInitializedRef.current) {
       hasTabRefreshInitializedRef.current = true;
       return;
     }
 
     void loadData({ silent: true });
-  }, [mobileTab, loadData]);
+  }, [authUser, mobileTab, loadData]);
 
   const rangeExpenses = useMemo(() => filterExpensesByPresetRange(expenses, range), [expenses, range]);
 
@@ -531,9 +746,8 @@ export default function App() {
     }
 
     const filteredBySelection = expenses.filter((expense) => {
-      const categoryMatch = trendCategoryId === 'all' || expense.categoryId === trendCategoryId;
-      const subcategoryMatch =
-        trendSubcategory === 'all' || normalizeSubcategory(expense.subcategoryName) === trendSubcategory;
+      const categoryMatch = matchesSelection(trendCategoryIds, expense.categoryId);
+      const subcategoryMatch = matchesSelection(trendSubcategories, normalizeSubcategory(expense.subcategoryName));
       const modeMatch = matchesExpenseMode(expense, trendShowBigTicket);
       return categoryMatch && subcategoryMatch && modeMatch;
     });
@@ -556,8 +770,8 @@ export default function App() {
     });
   }, [
     expenses,
-    trendCategoryId,
-    trendSubcategory,
+    trendCategoryIds,
+    trendSubcategories,
     trendShowBigTicket,
     trendStartDate,
     trendEndDate,
@@ -678,8 +892,8 @@ export default function App() {
     return buildTrendData(
       expenses,
       range,
-      trendCategoryId,
-      trendSubcategory,
+      trendCategoryIds,
+      trendSubcategories,
       trendShowBigTicket,
       trendStartDate,
       trendEndDate
@@ -687,8 +901,8 @@ export default function App() {
   }, [
     expenses,
     range,
-    trendCategoryId,
-    trendSubcategory,
+    trendCategoryIds,
+    trendSubcategories,
     trendShowBigTicket,
     trendStartDate,
     trendEndDate,
@@ -696,26 +910,40 @@ export default function App() {
   ]);
 
   const selectedTrendCategoryName = useMemo(() => {
-    if (trendCategoryId === 'all') {
+    if (trendCategoryIds.length === 0) {
       return 'All categories';
     }
 
-    return categories.find((category) => category.id === trendCategoryId)?.name ?? 'All categories';
-  }, [categories, trendCategoryId]);
+    if (trendCategoryIds.length === 1) {
+      return categories.find((category) => category.id === trendCategoryIds[0])?.name ?? 'All categories';
+    }
+
+    return `${trendCategoryIds.length} categories`;
+  }, [categories, trendCategoryIds]);
 
   const selectedTrendSubcategoryName = useMemo(() => {
-    if (trendSubcategory === 'all') {
+    if (trendSubcategories.length === 0) {
       return 'All subcategories';
     }
-    return (
-      trendSubcategoryOptions.find((item) => item.nameLower === trendSubcategory)?.name ??
-      trendSubcategory
-    );
-  }, [trendSubcategory, trendSubcategoryOptions]);
+
+    if (trendSubcategories.length === 1) {
+      return (
+        trendSubcategoryOptions.find((item) => item.nameLower === trendSubcategories[0])?.name ??
+        trendSubcategories[0]
+      );
+    }
+
+    return `${trendSubcategories.length} subcategories`;
+  }, [trendSubcategories, trendSubcategoryOptions]);
   const trendExpenseModeLabel = trendShowBigTicket ? 'Big-Ticket' : 'Daily Essentials';
 
   const categoryNameById = useMemo(
     () => new Map(categories.map((category) => [category.id, category.name])),
+    [categories]
+  );
+
+  const categoryColorByName = useMemo(
+    () => new Map(categories.map((category) => [category.name, category.color])),
     [categories]
   );
 
@@ -771,49 +999,32 @@ export default function App() {
   const expenseMonths = useMemo(() => {
     const months = new Set(
       expenses
-        .filter((expense) => selectedExpenseYear === 'all' || expense.date.startsWith(selectedExpenseYear))
+        .filter((expense) => matchesSelection(selectedExpenseYears, expense.date.slice(0, 4)))
         .map((expense) => expense.date.slice(5, 7))
     );
 
     return Array.from(months).sort((a, b) => a.localeCompare(b));
-  }, [expenses, selectedExpenseYear]);
-
-  const knownSubcategoryOptionsFromExpenses = useMemo(() => {
-    const uniques = new Map<string, string>();
-    for (const expense of expenses) {
-      const name = expense.subcategoryName.trim();
-      if (!name) {
-        continue;
-      }
-      const key = normalizeSubcategory(name);
-      if (!uniques.has(key)) {
-        uniques.set(key, name);
-      }
-    }
-    return Array.from(uniques.entries())
-      .map(([nameLower, name]) => ({ id: nameLower, name, nameLower }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [expenses]);
+  }, [expenses, selectedExpenseYears]);
 
   const recentBaseExpenses = useMemo(() => {
     return expenses.filter((expense) => {
       const year = expense.date.slice(0, 4);
       const month = expense.date.slice(5, 7);
-      const yearMatch = selectedExpenseYear === 'all' || year === selectedExpenseYear;
-      const monthMatch = selectedExpenseMonth === 'all' || month === selectedExpenseMonth;
-      const categoryMatch =
-        selectedExpenseCategoryId === 'all' || expense.categoryId === selectedExpenseCategoryId;
-      const subcategoryMatch =
-        selectedExpenseSubcategory === 'all' ||
-        normalizeSubcategory(expense.subcategoryName) === selectedExpenseSubcategory;
+      const yearMatch = matchesSelection(selectedExpenseYears, year);
+      const monthMatch = matchesSelection(selectedExpenseMonths, month);
+      const categoryMatch = matchesSelection(selectedExpenseCategoryIds, expense.categoryId);
+      const subcategoryMatch = matchesSelection(
+        selectedExpenseSubcategories,
+        normalizeSubcategory(expense.subcategoryName)
+      );
       return yearMatch && monthMatch && categoryMatch && subcategoryMatch;
     });
   }, [
     expenses,
-    selectedExpenseYear,
-    selectedExpenseMonth,
-    selectedExpenseCategoryId,
-    selectedExpenseSubcategory
+    selectedExpenseYears,
+    selectedExpenseMonths,
+    selectedExpenseCategoryIds,
+    selectedExpenseSubcategories
   ]);
 
   const recentDateBounds = useMemo(() => deriveDateBounds(recentBaseExpenses), [recentBaseExpenses]);
@@ -851,6 +1062,11 @@ export default function App() {
     [friendInsights]
   );
 
+  const universeExpenses = useMemo(
+    () => (friendAllExpenses.length > 0 ? friendAllExpenses : expenses),
+    [friendAllExpenses, expenses]
+  );
+
   const friendExpenseYears = useMemo(() => {
     const years = new Set(friendAllExpenses.map((expense) => expense.date.slice(0, 4)));
     return Array.from(years).sort((a, b) => b.localeCompare(a));
@@ -859,21 +1075,25 @@ export default function App() {
   const friendExpenseMonths = useMemo(() => {
     const months = new Set(
       friendAllExpenses
-        .filter((expense) => friendFilterYear === 'all' || expense.date.startsWith(friendFilterYear))
+        .filter((expense) => matchesSelection(friendFilterYears, expense.date.slice(0, 4)))
         .map((expense) => expense.date.slice(5, 7))
     );
     return Array.from(months).sort((a, b) => a.localeCompare(b));
-  }, [friendAllExpenses, friendFilterYear]);
+  }, [friendAllExpenses, friendFilterYears]);
 
   const friendFilterCategories = useMemo(() => {
     const categoriesSet = new Set(friendAllExpenses.map((expense) => expense.categoryName).filter(Boolean));
     return Array.from(categoriesSet).sort((a, b) => a.localeCompare(b));
   }, [friendAllExpenses]);
 
-  const friendFilterSubcategories = useMemo(() => {
+  const friendFilterSubcategoryOptions = useMemo(() => {
+    if (friendFilterCategoryNames.length === 0) {
+      return [] as Array<{ nameLower: string; name: string }>;
+    }
+
     const uniques = new Map<string, string>();
     for (const expense of friendAllExpenses) {
-      if (friendFilterCategoryName !== 'all' && expense.categoryName !== friendFilterCategoryName) {
+      if (!matchesSelection(friendFilterCategoryNames, expense.categoryName)) {
         continue;
       }
       const subcategory = expense.subcategoryName.trim();
@@ -888,28 +1108,28 @@ export default function App() {
     return Array.from(uniques.entries())
       .map(([nameLower, name]) => ({ nameLower, name }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [friendAllExpenses, friendFilterCategoryName]);
+  }, [friendAllExpenses, friendFilterCategoryNames]);
 
   const friendBaseExpenses = useMemo(() => {
     return friendAllExpenses.filter((expense) => {
       const year = expense.date.slice(0, 4);
       const month = expense.date.slice(5, 7);
-      const yearMatch = friendFilterYear === 'all' || year === friendFilterYear;
-      const monthMatch = friendFilterMonth === 'all' || month === friendFilterMonth;
-      const categoryMatch =
-        friendFilterCategoryName === 'all' || expense.categoryName === friendFilterCategoryName;
-      const subcategoryMatch =
-        friendFilterSubcategory === 'all' ||
-        normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
+      const yearMatch = matchesSelection(friendFilterYears, year);
+      const monthMatch = matchesSelection(friendFilterMonths, month);
+      const categoryMatch = matchesSelection(friendFilterCategoryNames, expense.categoryName);
+      const subcategoryMatch = matchesSelection(
+        friendFilterSubcategories,
+        normalizeSubcategory(expense.subcategoryName)
+      );
       const modeMatch = matchesExpenseMode(expense, friendShowBigTicket);
       return yearMatch && monthMatch && categoryMatch && subcategoryMatch && modeMatch;
     });
   }, [
     friendAllExpenses,
-    friendFilterYear,
-    friendFilterMonth,
-    friendFilterCategoryName,
-    friendFilterSubcategory,
+    friendFilterYears,
+    friendFilterMonths,
+    friendFilterCategoryNames,
+    friendFilterSubcategories,
     friendShowBigTicket
   ]);
 
@@ -930,13 +1150,13 @@ export default function App() {
       const filteredExpenses = item.expenses.filter((expense) => {
         const year = expense.date.slice(0, 4);
         const month = expense.date.slice(5, 7);
-        const yearMatch = friendFilterYear === 'all' || year === friendFilterYear;
-        const monthMatch = friendFilterMonth === 'all' || month === friendFilterMonth;
-        const categoryMatch =
-          friendFilterCategoryName === 'all' || expense.categoryName === friendFilterCategoryName;
-        const subcategoryMatch =
-          friendFilterSubcategory === 'all' ||
-          normalizeSubcategory(expense.subcategoryName) === friendFilterSubcategory;
+        const yearMatch = matchesSelection(friendFilterYears, year);
+        const monthMatch = matchesSelection(friendFilterMonths, month);
+        const categoryMatch = matchesSelection(friendFilterCategoryNames, expense.categoryName);
+        const subcategoryMatch = matchesSelection(
+          friendFilterSubcategories,
+          normalizeSubcategory(expense.subcategoryName)
+        );
         const modeMatch = matchesExpenseMode(expense, friendShowBigTicket);
         const startMatch = expense.date >= effectiveFriendStartDate;
         const endMatch = expense.date <= effectiveFriendEndDate;
@@ -953,10 +1173,10 @@ export default function App() {
     });
   }, [
     friendInsights,
-    friendFilterYear,
-    friendFilterMonth,
-    friendFilterCategoryName,
-    friendFilterSubcategory,
+    friendFilterYears,
+    friendFilterMonths,
+    friendFilterCategoryNames,
+    friendFilterSubcategories,
     friendShowBigTicket,
     effectiveFriendStartDate,
     effectiveFriendEndDate,
@@ -1301,204 +1521,239 @@ export default function App() {
   const friendFilterSummary = useMemo(() => {
     const segments: string[] = [];
     segments.push(friendFilterPreset === 'custom' ? 'Custom range' : friendFilterPreset.toUpperCase());
-    if (friendFilterYear !== 'all') {
-      segments.push(friendFilterYear);
+    if (friendFilterYears.length > 0) {
+      segments.push(friendFilterYears.length === 1 ? friendFilterYears[0] : `${friendFilterYears.length} years`);
     }
-    if (friendFilterMonth !== 'all') {
-      segments.push(monthName(friendFilterMonth));
+    if (friendFilterMonths.length > 0) {
+      segments.push(
+        friendFilterMonths.length === 1 ? monthName(friendFilterMonths[0]) : `${friendFilterMonths.length} months`
+      );
     }
-    if (friendFilterCategoryName !== 'all') {
-      segments.push(friendFilterCategoryName);
+    if (friendFilterCategoryNames.length > 0) {
+      segments.push(
+        friendFilterCategoryNames.length === 1
+          ? friendFilterCategoryNames[0]
+          : `${friendFilterCategoryNames.length} categories`
+      );
     }
-    if (friendFilterSubcategory !== 'all') {
-      const subcategoryLabel =
-        friendFilterSubcategories.find((item) => item.nameLower === friendFilterSubcategory)?.name ??
-        friendFilterSubcategory;
-      segments.push(subcategoryLabel);
+    if (friendFilterSubcategories.length > 0) {
+      if (friendFilterSubcategories.length === 1) {
+        const subcategoryLabel =
+          friendFilterSubcategoryOptions.find((item) => item.nameLower === friendFilterSubcategories[0])?.name ??
+          friendFilterSubcategories[0];
+        segments.push(subcategoryLabel);
+      } else {
+        segments.push(`${friendFilterSubcategories.length} subcategories`);
+      }
     }
     segments.push(`${effectiveFriendStartDate} to ${effectiveFriendEndDate}`);
     segments.push(friendShowBigTicket ? 'Big-Ticket view' : 'Daily Essentials view');
-    segments.push(includeMeInFriendComparison ? 'Including me' : 'Friends only');
+    segments.push(includeMeInFriendComparison ? 'Including me' : 'Universe only');
     return segments.join(' • ');
   }, [
     friendFilterPreset,
-    friendFilterYear,
-    friendFilterMonth,
-    friendFilterCategoryName,
-    friendFilterSubcategory,
+    friendFilterYears,
+    friendFilterMonths,
+    friendFilterCategoryNames,
     friendFilterSubcategories,
+    friendFilterSubcategoryOptions,
     effectiveFriendStartDate,
     effectiveFriendEndDate,
     friendShowBigTicket,
     includeMeInFriendComparison
   ]);
 
-  useEffect(() => {
-    if (selectedExpenseYear !== 'all' && !expenseYears.includes(selectedExpenseYear)) {
-      setSelectedExpenseYear('all');
-    }
-  }, [expenseYears, selectedExpenseYear]);
+  const trendCategoryFilterOptions = useMemo(
+    () =>
+      categories.map((category) => ({
+        value: category.id,
+        label: category.name,
+        color: category.color
+      })),
+    [categories]
+  );
+
+  const trendSubcategoryFilterOptions = useMemo(
+    () =>
+      trendSubcategoryOptions.map((subcategory) => ({
+        value: subcategory.nameLower,
+        label: subcategory.name
+      })),
+    [trendSubcategoryOptions]
+  );
+
+  const expenseYearFilterOptions = useMemo(
+    () => expenseYears.map((year) => ({ value: year, label: year })),
+    [expenseYears]
+  );
+
+  const expenseMonthFilterOptions = useMemo(
+    () => expenseMonths.map((month) => ({ value: month, label: monthName(month) })),
+    [expenseMonths]
+  );
+
+  const expenseCategoryFilterOptions = useMemo(
+    () =>
+      categories.map((category) => ({
+        value: category.id,
+        label: category.name,
+        color: category.color
+      })),
+    [categories]
+  );
+
+  const recentSubcategoryFilterOptions = useMemo(
+    () =>
+      buildColoredSubcategoryFilterOptions(
+        universeExpenses,
+        categoryColorByName,
+        selectedExpenseCategoryIds
+          .map((selectedId) => categoryNameById.get(selectedId) ?? '')
+          .filter(Boolean)
+      ),
+    [universeExpenses, categoryColorByName, selectedExpenseCategoryIds, categoryNameById]
+  );
+
+  const friendYearFilterOptions = useMemo(
+    () => friendExpenseYears.map((year) => ({ value: year, label: year })),
+    [friendExpenseYears]
+  );
+
+  const friendMonthFilterOptions = useMemo(
+    () => friendExpenseMonths.map((month) => ({ value: month, label: monthName(month) })),
+    [friendExpenseMonths]
+  );
+
+  const friendCategoryFilterOptions = useMemo(
+    () =>
+      friendFilterCategories.map((category) => ({
+        value: category,
+        label: category,
+        color: categoryColorByName.get(category)
+      })),
+    [friendFilterCategories, categoryColorByName]
+  );
+
+  const friendSubcategoryFilterOptions = useMemo(
+    () =>
+      buildColoredSubcategoryFilterOptions(friendAllExpenses, categoryColorByName, friendFilterCategoryNames),
+    [friendAllExpenses, categoryColorByName, friendFilterCategoryNames]
+  );
 
   useEffect(() => {
-    if (selectedExpenseMonth !== 'all' && !expenseMonths.includes(selectedExpenseMonth)) {
-      setSelectedExpenseMonth('all');
-    }
-  }, [expenseMonths, selectedExpenseMonth]);
+    setSelectedExpenseYears((current) => keepValidSelections(current, expenseYears));
+  }, [expenseYears]);
 
   useEffect(() => {
-    if (selectedExpenseCategoryId !== 'all' && !categories.some((category) => category.id === selectedExpenseCategoryId)) {
-      setSelectedExpenseCategoryId('all');
-    }
-  }, [categories, selectedExpenseCategoryId]);
+    setSelectedExpenseMonths((current) => keepValidSelections(current, expenseMonths));
+  }, [expenseMonths]);
 
   useEffect(() => {
-    if (friendFilterYear !== 'all' && !friendExpenseYears.includes(friendFilterYear)) {
-      setFriendFilterYear('all');
-    }
-  }, [friendExpenseYears, friendFilterYear]);
+    setSelectedExpenseCategoryIds((current) =>
+      keepValidSelections(
+        current,
+        categories.map((category) => category.id)
+      )
+    );
+  }, [categories]);
 
   useEffect(() => {
-    if (friendFilterMonth !== 'all' && !friendExpenseMonths.includes(friendFilterMonth)) {
-      setFriendFilterMonth('all');
-    }
-  }, [friendExpenseMonths, friendFilterMonth]);
+    setFriendFilterYears((current) => keepValidSelections(current, friendExpenseYears));
+  }, [friendExpenseYears]);
 
   useEffect(() => {
-    if (trendCategoryId !== 'all' && !categories.some((category) => category.id === trendCategoryId)) {
-      setTrendCategoryId('all');
-    }
-  }, [categories, trendCategoryId]);
+    setFriendFilterMonths((current) => keepValidSelections(current, friendExpenseMonths));
+  }, [friendExpenseMonths]);
 
   useEffect(() => {
-    if (
-      friendFilterCategoryName !== 'all' &&
-      !friendFilterCategories.includes(friendFilterCategoryName)
-    ) {
-      setFriendFilterCategoryName('all');
-    }
-  }, [friendFilterCategories, friendFilterCategoryName]);
+    setTrendCategoryIds((current) =>
+      keepValidSelections(
+        current,
+        categories.map((category) => category.id)
+      )
+    );
+  }, [categories]);
 
   useEffect(() => {
-    if (
-      friendFilterSubcategory !== 'all' &&
-      !friendFilterSubcategories.some((item) => item.nameLower === friendFilterSubcategory)
-    ) {
-      setFriendFilterSubcategory('all');
-    }
-  }, [friendFilterSubcategories, friendFilterSubcategory]);
+    setFriendFilterCategoryNames((current) => keepValidSelections(current, friendFilterCategories));
+  }, [friendFilterCategories]);
 
   useEffect(() => {
-    let cancelled = false;
+    setFriendFilterSubcategories((current) =>
+      keepValidSelections(
+        current,
+        friendFilterSubcategoryOptions.map((item) => item.nameLower)
+      )
+    );
+  }, [friendFilterSubcategoryOptions]);
+
+  useEffect(() => {
     const selectedCategoryName = categoryNameById.get(categoryId) ?? '';
 
     setSubcategoryName('');
     if (!selectedCategoryName) {
       setSubcategoryOptions([]);
-      return undefined;
+      return;
     }
 
-    void fetchGlobalSubcategories(selectedCategoryName)
-      .then((items) => {
-        if (!cancelled) {
-          setSubcategoryOptions(items);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setSubcategoryOptions([]);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [categoryId, categoryNameById]);
+    setSubcategoryOptions(buildSubcategoryOptionsFromExpenses(universeExpenses, [selectedCategoryName]));
+  }, [categoryId, categoryNameById, universeExpenses]);
 
   useEffect(() => {
-    let cancelled = false;
-    const loadTrendSubcategories = async () => {
-      if (trendCategoryId === 'all') {
-        setTrendSubcategoryOptions(knownSubcategoryOptionsFromExpenses);
-        return;
-      }
-
-      const categoryName = categoryNameById.get(trendCategoryId) ?? '';
-      if (!categoryName) {
-        setTrendSubcategoryOptions([]);
-        return;
-      }
-
-      try {
-        const items = await fetchGlobalSubcategories(categoryName);
-        if (!cancelled) {
-          setTrendSubcategoryOptions(items);
-        }
-      } catch {
-        if (!cancelled) {
-          setTrendSubcategoryOptions([]);
-        }
-      }
-    };
-
-    void loadTrendSubcategories();
-    return () => {
-      cancelled = true;
-    };
-  }, [trendCategoryId, categoryNameById, knownSubcategoryOptionsFromExpenses]);
-
-  useEffect(() => {
-    if (
-      trendSubcategory !== 'all' &&
-      !trendSubcategoryOptions.some((item) => item.nameLower === trendSubcategory)
-    ) {
-      setTrendSubcategory('all');
+    if (trendCategoryIds.length === 0) {
+      setTrendSubcategoryOptions([]);
+      return;
     }
-  }, [trendSubcategory, trendSubcategoryOptions]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadRecentSubcategories = async () => {
-      if (selectedExpenseCategoryId === 'all') {
-        setRecentSubcategoryOptions(knownSubcategoryOptionsFromExpenses);
-        return;
-      }
-
-      const categoryName = categoryNameById.get(selectedExpenseCategoryId) ?? '';
-      if (!categoryName) {
-        setRecentSubcategoryOptions([]);
-        return;
-      }
-
-      try {
-        const items = await fetchGlobalSubcategories(categoryName);
-        if (!cancelled) {
-          setRecentSubcategoryOptions(items);
-        }
-      } catch {
-        if (!cancelled) {
-          setRecentSubcategoryOptions([]);
-        }
-      }
-    };
-
-    void loadRecentSubcategories();
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedExpenseCategoryId, categoryNameById, knownSubcategoryOptionsFromExpenses]);
-
-  useEffect(() => {
-    if (
-      selectedExpenseSubcategory !== 'all' &&
-      !recentSubcategoryOptions.some((item) => item.nameLower === selectedExpenseSubcategory)
-    ) {
-      setSelectedExpenseSubcategory('all');
+    const categoryNames = trendCategoryIds
+      .map((selectedId) => categoryNameById.get(selectedId) ?? '')
+      .filter(Boolean);
+    if (categoryNames.length === 0) {
+      setTrendSubcategoryOptions([]);
+      return;
     }
-  }, [selectedExpenseSubcategory, recentSubcategoryOptions]);
+
+    setTrendSubcategoryOptions(buildSubcategoryOptionsFromExpenses(universeExpenses, categoryNames));
+  }, [trendCategoryIds, categoryNameById, universeExpenses]);
+
+  useEffect(() => {
+    setTrendSubcategories((current) =>
+      keepValidSelections(
+        current,
+        trendSubcategoryOptions.map((item) => item.nameLower)
+      )
+    );
+  }, [trendSubcategoryOptions]);
+
+  useEffect(() => {
+    if (selectedExpenseCategoryIds.length === 0) {
+      setRecentSubcategoryOptions([]);
+      return;
+    }
+
+    const categoryNames = selectedExpenseCategoryIds
+      .map((selectedId) => categoryNameById.get(selectedId) ?? '')
+      .filter(Boolean);
+    if (categoryNames.length === 0) {
+      setRecentSubcategoryOptions([]);
+      return;
+    }
+
+    setRecentSubcategoryOptions(buildSubcategoryOptionsFromExpenses(universeExpenses, categoryNames));
+  }, [selectedExpenseCategoryIds, categoryNameById, universeExpenses]);
+
+  useEffect(() => {
+    setSelectedExpenseSubcategories((current) =>
+      keepValidSelections(
+        current,
+        recentSubcategoryOptions.map((item) => item.nameLower)
+      )
+    );
+  }, [recentSubcategoryOptions]);
 
   useEffect(() => {
     setMobileTrendView('trend');
-  }, [range, trendCategoryId, trendSubcategory, trendShowBigTicket, trendStartDate, trendEndDate]);
+  }, [range, trendCategoryIds, trendSubcategories, trendShowBigTicket, trendStartDate, trendEndDate]);
 
   useEffect(() => {
     const anyModalOpen =
@@ -1610,44 +1865,30 @@ export default function App() {
     }
   }
 
-  async function onSwitchExistingUser(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    setManagingProfile(true);
+  async function onSignIn() {
+    setAuthBusy(true);
     setError('');
 
     try {
-      const existing = await getUserByUsername(draftSwitchUsername);
-      if (!existing) {
-        throw new Error('Username not found. Create it first.');
-      }
-
-      setUserId(existing.id);
-      setDraftCreateUsername('');
-      setIsUserModalOpen(false);
+      await signInWithGoogle();
     } catch (requestError) {
-      setError(readErrorMessage(requestError, 'Failed to switch user.'));
+      setError(readErrorMessage(requestError, 'Failed to sign in with Google.'));
     } finally {
-      setManagingProfile(false);
+      setAuthBusy(false);
     }
   }
 
-  async function onCreateUser(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    setManagingProfile(true);
+  async function onSignOut() {
+    setAuthBusy(true);
     setError('');
 
     try {
-      const created = await createUser(draftCreateUsername);
-      setUserId(created.id);
-      setDraftSwitchUsername(created.username);
-      setDraftCreateUsername('');
+      await signOutFromApp();
       setIsUserModalOpen(false);
     } catch (requestError) {
-      setError(readErrorMessage(requestError, 'Failed to create user.'));
+      setError(readErrorMessage(requestError, 'Failed to sign out.'));
     } finally {
-      setManagingProfile(false);
+      setAuthBusy(false);
     }
   }
 
@@ -1707,8 +1948,8 @@ export default function App() {
     setFriendFilterPreset(preset);
 
     if (preset === 'all') {
-      setFriendFilterYear('all');
-      setFriendFilterMonth('all');
+      setFriendFilterYears([]);
+      setFriendFilterMonths([]);
       setFriendFilterStartDate('');
       setFriendFilterEndDate('');
       return;
@@ -1723,6 +1964,8 @@ export default function App() {
       start = new Date(now.getFullYear(), 0, 1);
     }
 
+    setFriendFilterYears([]);
+    setFriendFilterMonths([]);
     setFriendFilterStartDate(start.toISOString().slice(0, 10));
     setFriendFilterEndDate(today);
   }
@@ -1778,6 +2021,45 @@ export default function App() {
     });
   }, []);
 
+  const visibleUserName =
+    userName || authUser?.displayName?.trim() || authUser?.email?.split('@')[0] || 'User';
+  const heroUserLabel = userName ? `@${userName}` : authUser?.email ?? 'Sign in to continue';
+  const profileInitial = (userName || visibleUserName).trim().charAt(0).toUpperCase() || 'U';
+
+  if (!authReady) {
+    return (
+      <main className="page-shell auth-shell">
+        <div className="bg-orb bg-orb-top" />
+        <div className="bg-orb bg-orb-bottom" />
+        <section className="auth-card glass">
+          <p className="eyebrow app-title">BudgetPulse</p>
+          <h1>Checking your sign-in...</h1>
+          <p className="muted">This usually takes a moment.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <main className="page-shell auth-shell">
+        <div className="bg-orb bg-orb-top" />
+        <div className="bg-orb bg-orb-bottom" />
+        <section className="auth-card glass">
+          <p className="eyebrow app-title">BudgetPulse</p>
+          <h1>Sign in to continue</h1>
+          <p className="muted">
+            Use the Google account linked to your profile so your expenses, categories, and universe load correctly.
+          </p>
+          <button type="button" className="primary auth-action-btn" onClick={onSignIn} disabled={authBusy}>
+            {authBusy ? 'Opening Google...' : 'Continue with Google'}
+          </button>
+        </section>
+        {error ? <p className="error-banner">{error}</p> : null}
+      </main>
+    );
+  }
+
   return (
     <main className="page-shell">
       <div className="bg-orb bg-orb-top" />
@@ -1786,21 +2068,17 @@ export default function App() {
       <section className="hero-card glass">
         <div>
           <p className="eyebrow app-title">BudgetPulse</p>
-          <p className="hero-quote">Track today so tomorrow feels lighter.</p>
-          <p className="hero-user">@{userName}</p>
+          <p className="hero-quote">Start by adding today&apos;s spending, then use Trends to spot patterns.</p>
+          <p className="hero-user">{heroUserLabel}</p>
         </div>
         <button
           type="button"
           className="profile-btn"
-          onClick={() => {
-            setDraftSwitchUsername(userName);
-            setDraftCreateUsername('');
-            setIsUserModalOpen(true);
-          }}
-          aria-label="Open profile and user switch"
-          title={`Current user: ${userName}`}
+          onClick={() => setIsUserModalOpen(true)}
+          aria-label="Open profile"
+          title={`Current user: ${visibleUserName}`}
         >
-          <span>{userName.trim().charAt(0).toUpperCase() || 'U'}</span>
+          <span>{profileInitial}</span>
         </button>
       </section>
 
@@ -1808,44 +2086,33 @@ export default function App() {
         <div className="modal-backdrop" onClick={() => setIsUserModalOpen(false)}>
           <div className="modal-card glass profile-modal-card" onClick={(event) => event.stopPropagation()}>
             <h3>Profile</h3>
-            <p>Current username: @{userName}</p>
-
-            <form className="user-switcher" onSubmit={onSwitchExistingUser}>
-              <label htmlFor="switchUser">Switch to existing username</label>
-              <input
-                id="switchUser"
-                value={draftSwitchUsername}
-                onChange={(event) => setDraftSwitchUsername(event.target.value)}
-                placeholder="e.g. rahul_13"
-              />
-              <button type="submit" className="secondary" disabled={managingProfile}>
-                {managingProfile ? 'Switching...' : 'Switch User'}
-              </button>
-            </form>
-
-            <form className="user-switcher" onSubmit={onCreateUser}>
-              <label htmlFor="createUser">Create new username</label>
-              <input
-                id="createUser"
-                value={draftCreateUsername}
-                onChange={(event) => setDraftCreateUsername(event.target.value)}
-                placeholder="3-24 chars: letters, numbers, _, -"
-              />
-              <button type="submit" className="primary" disabled={managingProfile}>
-                {managingProfile ? 'Creating...' : 'Create User'}
-              </button>
-            </form>
+            <section className="profile-account-block">
+              <div className="profile-account-head">
+                <div className="profile-account-avatar fallback-avatar">
+                  {profileInitial}
+                </div>
+                <div>
+                  <h4>{authUser.displayName?.trim() || visibleUserName}</h4>
+                  <p>{authUser.email ?? 'No Google email found'}</p>
+                  <p>Budget profile: @{userName}</p>
+                </div>
+              </div>
+              <p>
+                Use this profile to check which budget you&apos;re in, add people to your universe by username, or
+                sign out when needed.
+              </p>
+            </section>
 
             <section className="profile-friends-block">
               <div className="profile-friends-head">
-                <h4>Manage Friends</h4>
-                <p>Search and add, or remove existing friends.</p>
+                <h4>Manage Universe</h4>
+                <p>Search by username to bring people into your universe and compare spending together.</p>
               </div>
               <form className="profile-friend-search" onSubmit={onSearchFriends}>
                 <input
                   value={friendSearchTerm}
                   onChange={(event) => setFriendSearchTerm(event.target.value)}
-                  placeholder="Search username to add friend"
+                  placeholder="Enter a username to add to your universe"
                 />
                 <button type="submit" className="secondary" disabled={searchingFriends}>
                   {searchingFriends ? 'Searching...' : 'Search'}
@@ -1867,7 +2134,7 @@ export default function App() {
                           onClick={() => onAddFriend(item.username)}
                         >
                           {alreadyAdded
-                            ? 'Added'
+                            ? 'In Universe'
                             : addingFriendUsername === item.username
                               ? 'Adding...'
                               : 'Add'}
@@ -1895,11 +2162,14 @@ export default function App() {
                   ))}
                 </div>
               ) : (
-                <p className="muted">No friends added yet.</p>
+                <p className="muted">Your universe is empty. Add someone here to compare totals and recent expenses.</p>
               )}
             </section>
 
             <div className="modal-actions">
+              <button type="button" className="danger-btn" onClick={onSignOut} disabled={authBusy}>
+                {authBusy ? 'Signing out...' : 'Sign Out'}
+              </button>
               <button type="button" className="secondary" onClick={() => setIsUserModalOpen(false)}>
                 Close
               </button>
@@ -1930,35 +2200,28 @@ export default function App() {
               ))}
             </div>
             <div className="modal-filter-grid">
-              <label htmlFor="trendCategory">Category</label>
-              <select
-                id="trendCategory"
-                value={trendCategoryId}
-                onChange={(event) => {
-                  setTrendCategoryId(event.target.value);
-                  setTrendSubcategory('all');
-                }}
-              >
-                <option value="all">All categories</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-              <label htmlFor="trendSubcategory">Subcategory</label>
-              <select
-                id="trendSubcategory"
-                value={trendSubcategory}
-                onChange={(event) => setTrendSubcategory(event.target.value)}
-              >
-                <option value="all">All subcategories</option>
-                {trendSubcategoryOptions.map((subcategory) => (
-                  <option key={subcategory.nameLower} value={subcategory.nameLower}>
-                    {subcategory.name}
-                  </option>
-                ))}
-              </select>
+              <FilterChipField
+                label="Category"
+                allLabel="All categories"
+                options={trendCategoryFilterOptions}
+                selectedValues={trendCategoryIds}
+                onToggle={(value) => setTrendCategoryIds((current) => toggleSelection(current, value))}
+                onClear={() => setTrendCategoryIds([])}
+                emptyText="No categories yet."
+              />
+              {trendCategoryIds.length > 0 ? (
+                <FilterChipField
+                  label="Subcategory"
+                  allLabel="All subcategories"
+                  options={trendSubcategoryFilterOptions}
+                  selectedValues={trendSubcategories}
+                  onToggle={(value) => setTrendSubcategories((current) => toggleSelection(current, value))}
+                  onClear={() => setTrendSubcategories([])}
+                  emptyText="No matching subcategories yet."
+                />
+              ) : (
+                <p className="filter-chip-hint">Choose at least one category to see matching subcategories.</p>
+              )}
               <label htmlFor="trendStartDate">Start Date</label>
               <input
                 id="trendStartDate"
@@ -1981,8 +2244,8 @@ export default function App() {
                 onClick={() => {
                   const defaultRange = getDefaultTrendDateRange('monthly');
                   setRange('monthly');
-                  setTrendCategoryId('all');
-                  setTrendSubcategory('all');
+                  setTrendCategoryIds([]);
+                  setTrendSubcategories([]);
                   setTrendStartDate(defaultRange.start);
                   setTrendEndDate(defaultRange.end);
                 }}
@@ -2002,61 +2265,46 @@ export default function App() {
           <div className="modal-card glass filter-modal" onClick={(event) => event.stopPropagation()}>
             <h3>Recent Filters</h3>
             <div className="modal-filter-grid">
-              <label htmlFor="expenseYearFilter">Year</label>
-              <select
-                id="expenseYearFilter"
-                value={selectedExpenseYear}
-                onChange={(event) => setSelectedExpenseYear(event.target.value)}
-              >
-                <option value="all">All years</option>
-                {expenseYears.map((year) => (
-                  <option key={year} value={year}>
-                    {year}
-                  </option>
-                ))}
-              </select>
-              <label htmlFor="expenseMonthFilter">Month</label>
-              <select
-                id="expenseMonthFilter"
-                value={selectedExpenseMonth}
-                onChange={(event) => setSelectedExpenseMonth(event.target.value)}
-              >
-                <option value="all">All months</option>
-                {expenseMonths.map((month) => (
-                  <option key={month} value={month}>
-                    {monthName(month)}
-                  </option>
-                ))}
-              </select>
-              <label htmlFor="expenseCategoryFilter">Category</label>
-              <select
-                id="expenseCategoryFilter"
-                value={selectedExpenseCategoryId}
-                onChange={(event) => {
-                  setSelectedExpenseCategoryId(event.target.value);
-                  setSelectedExpenseSubcategory('all');
-                }}
-              >
-                <option value="all">All categories</option>
-                {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
-                ))}
-              </select>
-              <label htmlFor="expenseSubcategoryFilter">Subcategory</label>
-              <select
-                id="expenseSubcategoryFilter"
-                value={selectedExpenseSubcategory}
-                onChange={(event) => setSelectedExpenseSubcategory(event.target.value)}
-              >
-                <option value="all">All subcategories</option>
-                {recentSubcategoryOptions.map((subcategory) => (
-                  <option key={subcategory.nameLower} value={subcategory.nameLower}>
-                    {subcategory.name}
-                  </option>
-                ))}
-              </select>
+              <FilterChipField
+                label="Year"
+                allLabel="All years"
+                options={expenseYearFilterOptions}
+                selectedValues={selectedExpenseYears}
+                onToggle={(value) => setSelectedExpenseYears((current) => toggleSelection(current, value))}
+                onClear={() => setSelectedExpenseYears([])}
+                emptyText="No years yet."
+              />
+              <FilterChipField
+                label="Month"
+                allLabel="All months"
+                options={expenseMonthFilterOptions}
+                selectedValues={selectedExpenseMonths}
+                onToggle={(value) => setSelectedExpenseMonths((current) => toggleSelection(current, value))}
+                onClear={() => setSelectedExpenseMonths([])}
+                emptyText="No months yet."
+              />
+              <FilterChipField
+                label="Category"
+                allLabel="All categories"
+                options={expenseCategoryFilterOptions}
+                selectedValues={selectedExpenseCategoryIds}
+                onToggle={(value) => setSelectedExpenseCategoryIds((current) => toggleSelection(current, value))}
+                onClear={() => setSelectedExpenseCategoryIds([])}
+                emptyText="No categories yet."
+              />
+              {selectedExpenseCategoryIds.length > 0 ? (
+                <FilterChipField
+                  label="Subcategory"
+                  allLabel="All subcategories"
+                  options={recentSubcategoryFilterOptions}
+                  selectedValues={selectedExpenseSubcategories}
+                  onToggle={(value) => setSelectedExpenseSubcategories((current) => toggleSelection(current, value))}
+                  onClear={() => setSelectedExpenseSubcategories([])}
+                  emptyText="No matching subcategories yet."
+                />
+              ) : (
+                <p className="filter-chip-hint">Select a category first to narrow down subcategories.</p>
+              )}
               <label htmlFor="recentStartDate">Start Date</label>
               <input
                 id="recentStartDate"
@@ -2077,10 +2325,10 @@ export default function App() {
                 type="button"
                 className="secondary"
                 onClick={() => {
-                  setSelectedExpenseYear('all');
-                  setSelectedExpenseMonth('all');
-                  setSelectedExpenseCategoryId('all');
-                  setSelectedExpenseSubcategory('all');
+                  setSelectedExpenseYears([]);
+                  setSelectedExpenseMonths([]);
+                  setSelectedExpenseCategoryIds([]);
+                  setSelectedExpenseSubcategories([]);
                   setRecentStartDate('');
                   setRecentEndDate('');
                 }}
@@ -2098,7 +2346,7 @@ export default function App() {
       {isFriendFilterModalOpen ? (
         <div className="modal-backdrop" onClick={() => setIsFriendFilterModalOpen(false)}>
           <div className="modal-card glass filter-modal" onClick={(event) => event.stopPropagation()}>
-            <h3>Friend Comparison Filters</h3>
+            <h3>Universe Filters</h3>
             <div className="friend-preset-row">
               <button
                 type="button"
@@ -2130,70 +2378,73 @@ export default function App() {
               </button>
             </div>
             <div className="modal-filter-grid friend-filter-grid">
-              <label htmlFor="friendYearFilter">Year</label>
-              <select
-                id="friendYearFilter"
-                value={friendFilterYear}
-                onChange={(event) => {
+              <FilterChipField
+                label="Year"
+                allLabel="All years"
+                options={friendYearFilterOptions}
+                selectedValues={friendFilterYears}
+                onToggle={(value) => {
                   setFriendFilterPreset('custom');
-                  setFriendFilterYear(event.target.value);
+                  setFriendFilterYears((current) => toggleSelection(current, value));
                 }}
-              >
-                <option value="all">All years</option>
-                {friendExpenseYears.map((year) => (
-                  <option key={year} value={year}>
-                    {year}
-                  </option>
-                ))}
-              </select>
-
-              <label htmlFor="friendMonthFilter">Month</label>
-              <select
-                id="friendMonthFilter"
-                value={friendFilterMonth}
-                onChange={(event) => {
+                onClear={() => {
                   setFriendFilterPreset('custom');
-                  setFriendFilterMonth(event.target.value);
+                  setFriendFilterYears([]);
                 }}
-              >
-                <option value="all">All months</option>
-                {friendExpenseMonths.map((month) => (
-                  <option key={month} value={month}>
-                    {monthName(month)}
-                  </option>
-                ))}
-              </select>
+                emptyText="No years yet."
+              />
 
-              <label htmlFor="friendCategoryFilter">Category</label>
-              <select
-                id="friendCategoryFilter"
-                value={friendFilterCategoryName}
-                onChange={(event) => {
-                  setFriendFilterCategoryName(event.target.value);
-                  setFriendFilterSubcategory('all');
+              <FilterChipField
+                label="Month"
+                allLabel="All months"
+                options={friendMonthFilterOptions}
+                selectedValues={friendFilterMonths}
+                onToggle={(value) => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterMonths((current) => toggleSelection(current, value));
                 }}
-              >
-                <option value="all">All categories</option>
-                {friendFilterCategories.map((categoryName) => (
-                  <option key={categoryName} value={categoryName}>
-                    {categoryName}
-                  </option>
-                ))}
-              </select>
+                onClear={() => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterMonths([]);
+                }}
+                emptyText="No months yet."
+              />
 
-              <label htmlFor="friendSubcategoryFilter">Subcategory</label>
-              <select
-                id="friendSubcategoryFilter"
-                value={friendFilterSubcategory}
-                onChange={(event) => setFriendFilterSubcategory(event.target.value)}
-              >
-                <option value="all">All subcategories</option>
-                {friendFilterSubcategories.map((subcategory) => (
-                  <option key={subcategory.nameLower} value={subcategory.nameLower}>
-                    {subcategory.name}
-                  </option>
-                ))}
-              </select>
+              <FilterChipField
+                label="Category"
+                allLabel="All categories"
+                options={friendCategoryFilterOptions}
+                selectedValues={friendFilterCategoryNames}
+                onToggle={(value) => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterCategoryNames((current) => toggleSelection(current, value));
+                }}
+                onClear={() => {
+                  setFriendFilterPreset('custom');
+                  setFriendFilterCategoryNames([]);
+                }}
+                emptyText="No categories yet."
+              />
+
+              {friendFilterCategoryNames.length > 0 ? (
+                <FilterChipField
+                  label="Subcategory"
+                  allLabel="All subcategories"
+                  options={friendSubcategoryFilterOptions}
+                  selectedValues={friendFilterSubcategories}
+                  onToggle={(value) => {
+                    setFriendFilterPreset('custom');
+                    setFriendFilterSubcategories((current) => toggleSelection(current, value));
+                  }}
+                  onClear={() => {
+                    setFriendFilterPreset('custom');
+                    setFriendFilterSubcategories([]);
+                  }}
+                  emptyText="No matching subcategories yet."
+                />
+              ) : (
+                <p className="filter-chip-hint">Select a universe category first to view related subcategories.</p>
+              )}
 
               <label htmlFor="friendStartDate">Start Date</label>
               <input
@@ -2224,7 +2475,7 @@ export default function App() {
                 checked={includeMeInFriendComparison}
                 onChange={(event) => setIncludeMeInFriendComparison(event.target.checked)}
               />
-              Include my profile in comparisons
+              Include my profile in universe view
             </label>
 
             {isFriendRangeInvalid ? (
@@ -2237,10 +2488,10 @@ export default function App() {
                 className="secondary"
                 onClick={() => {
                   setFriendFilterPreset('all');
-                  setFriendFilterYear('all');
-                  setFriendFilterMonth('all');
-                  setFriendFilterCategoryName('all');
-                  setFriendFilterSubcategory('all');
+                  setFriendFilterYears([]);
+                  setFriendFilterMonths([]);
+                  setFriendFilterCategoryNames([]);
+                  setFriendFilterSubcategories([]);
                   setFriendFilterStartDate('');
                   setFriendFilterEndDate('');
                   setIncludeMeInFriendComparison(true);
@@ -2306,41 +2557,31 @@ export default function App() {
           <h2>{expenses.length}</h2>
         </article>
         <article className="metric-card glass">
-          <p>Friends Connected</p>
+          <p>Universe Connected</p>
           <h2>{friendOnlyInsights.length}</h2>
         </article>
       </section>
 
       <nav className="mobile-tabs glass" aria-label="Mobile sections">
-        <button
-          type="button"
-          className={mobileTab === 'add' ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
-          onClick={() => setMobileTab('add')}
-        >
-          Add
-        </button>
-        <button
-          type="button"
-          className={mobileTab === 'trends' ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
-          onClick={() => setMobileTab('trends')}
-        >
-          Trends
-        </button>
-        <button
-          type="button"
-          className={mobileTab === 'recent' ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
-          onClick={() => setMobileTab('recent')}
-        >
-          Recent
-        </button>
-        <button
-          type="button"
-          className={mobileTab === 'friends' ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
-          onClick={() => setMobileTab('friends')}
-        >
-          Friends
-        </button>
+        {MOBILE_TAB_ORDER.map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            className={mobileTab === tab ? 'mobile-tab-btn active' : 'mobile-tab-btn'}
+            onClick={() => setMobileTab(tab)}
+          >
+            {WORKSPACE_TAB_CONTENT[tab].label}
+          </button>
+        ))}
       </nav>
+
+      <section className="desktop-workspace-head glass">
+        <div>
+          <p className="eyebrow">Workspace</p>
+          <h3>{WORKSPACE_TAB_CONTENT[mobileTab].title}</h3>
+        </div>
+        <p>{WORKSPACE_TAB_CONTENT[mobileTab].description}</p>
+      </section>
 
       <div
         className={`mobile-main mobile-main-${mobileTab}`}
@@ -2364,7 +2605,7 @@ export default function App() {
                 <span>Big-Ticket Expense</span>
               </label>
             </div>
-            <p className="add-head-note">Every entry sharpens your money decisions.</p>
+            <p className="add-head-note">Enter amount, choose a category, and add a short note only if it helps later.</p>
 
             <form className="expense-form" onSubmit={onAddExpense}>
               <div className="amount-date-row">
@@ -2484,7 +2725,7 @@ export default function App() {
           >
             <div className="panel-head">
               <h3>Insights & Trends</h3>
-              <span>Switch expense type instantly.</span>
+              <span>Use filters to compare periods, categories, and spending types.</span>
             </div>
 
             <div className="panel-top-row">
@@ -2582,7 +2823,7 @@ export default function App() {
                 <h4>Category + Subcategory Split ({range})</h4>
                 <div className="chart-box">
                   {pieData.length === 0 ? (
-                    <p className="muted">Add expenses to unlock category split.</p>
+                    <p className="muted">Add a few expenses to see how your spending is split across categories.</p>
                   ) : (
                     <ResponsiveContainer width="100%" height={220}>
                       <PieChart>
@@ -2639,27 +2880,28 @@ export default function App() {
                 <div className="split-hier-legend">
                   {splitLegendGroups.map((group) => (
                     <div className="split-hier-category" key={group.name}>
-                      <div className="legend-item">
-                        <span style={{ backgroundColor: group.color }} />
-                        <p>
-                          {group.name}{' '}
-                          <strong>
-                            {currency.format(group.value)} ({group.percentage.toFixed(1)}%)
-                          </strong>
-                        </p>
+                      <div className="split-legend-card-head">
+                        <div className="split-legend-label" title={group.name}>
+                          <span className="split-legend-dot" style={{ backgroundColor: group.color }} />
+                          <strong>{group.name}</strong>
+                        </div>
+                        <div className="split-legend-values">
+                          <strong className="split-legend-primary">{currency.format(group.value)}</strong>
+                          <span className="split-legend-secondary">{group.percentage.toFixed(1)}%</span>
+                        </div>
                       </div>
                       {group.subcategories.length > 0 ? (
                         <div className="split-hier-sub-list">
                           {group.subcategories.map((sub) => (
                             <div className="split-hier-sub-item" key={sub.name}>
-                              <span style={{ backgroundColor: sub.color }} />
-                              <p>
-                                {sub.subcategoryName}{' '}
-                                <strong>
-                                  {currency.format(sub.value)} ({sub.percentage.toFixed(1)}% total,{' '}
-                                  {sub.categoryPercentage.toFixed(1)}% in {group.name})
-                                </strong>
-                              </p>
+                              <div className="split-legend-label split-legend-sublabel" title={sub.subcategoryName}>
+                                <span className="split-legend-dot split-legend-subdot" style={{ backgroundColor: sub.color }} />
+                                <span>{sub.subcategoryName}</span>
+                              </div>
+                              <div className="split-legend-values split-legend-subvalues">
+                                <strong className="split-legend-primary">{currency.format(sub.value)}</strong>
+                                <span className="split-legend-secondary">{sub.percentage.toFixed(1)}%</span>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -2741,8 +2983,8 @@ export default function App() {
         >
           <div className="panel-head friends-head">
             <div>
-              <h3>Friends Comparison</h3>
-              <span>Compare spend, categories, and patterns with filters.</span>
+              <h3>Universe</h3>
+              <span>Compare spend, categories, and patterns across your universe.</span>
             </div>
           </div>
 
@@ -2768,7 +3010,7 @@ export default function App() {
 
           <p className="muted friend-filter-summary">{friendFilterSummary}</p>
           {friendOnlyInsights.length === 0 ? (
-            <p className="muted">Add friends from Profile to unlock comparison insights.</p>
+            <p className="muted">Open Profile and add people to your universe by username to compare spending side by side.</p>
           ) : null}
 
           <div className="mobile-friend-switch">
@@ -2805,7 +3047,7 @@ export default function App() {
             {friendHighlights ? (
               <div className="friend-highlight-grid">
                 <article className="friend-highlight-card">
-                  <p>Highest Spender</p>
+                  <p>Highest in Universe</p>
                   <h5>
                     {friendHighlights.highestSpender.isCurrentUser
                       ? `${friendHighlights.highestSpender.user.username} (You)`
@@ -2823,7 +3065,7 @@ export default function App() {
                   <strong>{friendHighlights.mostActive.expenses.length} expenses</strong>
                 </article>
                 <article className="friend-highlight-card">
-                  <p>Top Shared Category</p>
+                  <p>Top Universe Category</p>
                   <h5>{friendHighlights.topCategoryEntry?.[0] ?? 'No category yet'}</h5>
                   <strong>
                     {friendHighlights.topCategoryEntry
@@ -2835,7 +3077,7 @@ export default function App() {
             ) : null}
 
             <div className="friend-section">
-              <h4>Combined Spend Trend</h4>
+              <h4>Combined Universe Trend</h4>
               <div className="friend-combined-summary">
                 <p>Total spend together</p>
                 <h5>{currency.format(friendCombinedTotal)}</h5>
@@ -2941,27 +3183,28 @@ export default function App() {
                 <div className="split-hier-legend">
                   {friendCombinedSplitLegendGroups.map((group) => (
                     <div className="split-hier-category" key={group.name}>
-                      <div className="legend-item">
-                        <span style={{ backgroundColor: group.color }} />
-                        <p>
-                          {group.name}{' '}
-                          <strong>
-                            {currency.format(group.value)} ({group.percentage.toFixed(1)}%)
-                          </strong>
-                        </p>
+                      <div className="split-legend-card-head">
+                        <div className="split-legend-label" title={group.name}>
+                          <span className="split-legend-dot" style={{ backgroundColor: group.color }} />
+                          <strong>{group.name}</strong>
+                        </div>
+                        <div className="split-legend-values">
+                          <strong className="split-legend-primary">{currency.format(group.value)}</strong>
+                          <span className="split-legend-secondary">{group.percentage.toFixed(1)}%</span>
+                        </div>
                       </div>
                       {group.subcategories.length > 0 ? (
                         <div className="split-hier-sub-list">
                           {group.subcategories.map((sub) => (
                             <div className="split-hier-sub-item" key={sub.name}>
-                              <span style={{ backgroundColor: sub.color }} />
-                              <p>
-                                {sub.subcategoryName}{' '}
-                                <strong>
-                                  {currency.format(sub.value)} ({sub.percentage.toFixed(1)}% total,{' '}
-                                  {sub.categoryPercentage.toFixed(1)}% in {group.name})
-                                </strong>
-                              </p>
+                              <div className="split-legend-label split-legend-sublabel" title={sub.subcategoryName}>
+                                <span className="split-legend-dot split-legend-subdot" style={{ backgroundColor: sub.color }} />
+                                <span>{sub.subcategoryName}</span>
+                              </div>
+                              <div className="split-legend-values split-legend-subvalues">
+                                <strong className="split-legend-primary">{currency.format(sub.value)}</strong>
+                                <span className="split-legend-secondary">{sub.percentage.toFixed(1)}%</span>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -3026,12 +3269,12 @@ export default function App() {
             ) : null}
 
             <div className="friend-section">
-              <h4>Overall Spend Comparison</h4>
+              <h4>Overall Universe Comparison</h4>
               <div className="chart-box friend-chart-box">
                 {isFriendRangeInvalid ? (
                   <p className="muted">Fix the date range to view comparison charts.</p>
                 ) : friendComparisonData.length <= 1 ? (
-                  <p className="muted">Add at least one friend (or include yourself) to compare overall spend.</p>
+                  <p className="muted">Add at least one person to your universe (or include yourself) to compare overall spend.</p>
                 ) : (
                   <ResponsiveContainer width="100%" height={220}>
                     <BarChart data={friendComparisonData}>
@@ -3112,11 +3355,11 @@ export default function App() {
             }
           >
             <div className="friend-section">
-              <h4>Recent Friend Expenses</h4>
+              <h4>Recent Universe Expenses</h4>
               {isFriendRangeInvalid ? (
-                <p className="muted">Fix the date range to view friend recents.</p>
+                <p className="muted">Fix the date range to view universe recents.</p>
               ) : filteredFriendOnlyInsights.length === 0 ? (
-                <p className="muted">No friend expenses found for selected filters.</p>
+                <p className="muted">No universe expenses found for the selected filters.</p>
               ) : (
                 <div className="friend-recents-grid">
                   {filteredFriendOnlyInsights.map((item) => (
