@@ -13,6 +13,7 @@ import {
   XAxis,
   YAxis
 } from 'recharts';
+import type { Unsubscribe } from 'firebase/auth';
 import {
   addFriendByUsername,
   createCategory,
@@ -25,7 +26,7 @@ import {
   removeFriend,
   searchUsers
 } from './lib/api';
-import { observeAuthState, signInWithGoogle, signOutFromApp, type AuthUser } from './lib/auth';
+import { initializeAuthState, observeAuthState, signInWithGoogle, signOutFromApp, type AuthUser } from './lib/auth';
 import type { Category, Expense, FriendInsight, Subcategory, UserSearchResult } from './lib/types';
 
 const currency = new Intl.NumberFormat('en-IN', {
@@ -604,12 +605,30 @@ export default function App() {
   const hasTabRefreshInitializedRef = useRef(false);
 
   useEffect(() => {
-    const unsubscribe = observeAuthState((nextUser) => {
-      setAuthUser(nextUser);
-      setAuthReady(true);
-    });
+    let cancelled = false;
+    let unsubscribe: Unsubscribe | undefined;
 
-    return unsubscribe;
+    void initializeAuthState()
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setError(readErrorMessage(error, 'Failed to restore your sign-in session.'));
+        }
+      })
+      .finally(() => {
+        if (cancelled) {
+          return;
+        }
+
+        unsubscribe = observeAuthState((nextUser: AuthUser | null) => {
+          setAuthUser(nextUser);
+          setAuthReady(true);
+        });
+      });
+
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, []);
 
   const loadData = useCallback(async (options?: { silent?: boolean }) => {
