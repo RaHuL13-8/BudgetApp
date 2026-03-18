@@ -1,93 +1,64 @@
 import {
-  GoogleAuthProvider,
-  getRedirectResult,
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
-  signInWithPopup,
-  signInWithRedirect,
+  signInWithEmailAndPassword,
   signOut,
   type Unsubscribe,
   type User
 } from 'firebase/auth';
 import { getFirebaseAuth } from './firebase';
 
-const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({
-  prompt: 'select_account'
-});
+const USERNAME_PATTERN = /^[a-zA-Z0-9_-]{3,24}$/;
+const AUTH_EMAIL_DOMAIN = 'users.budgetpulse.app';
 
-let persistenceReady: Promise<void> | null = null;
-let redirectResultReady: Promise<void> | null = null;
-
-function ensureRedirectResultProcessed(): Promise<void> {
-  if (!redirectResultReady) {
-    redirectResultReady = getRedirectResult(getFirebaseAuth())
-      .then(() => undefined)
-      .catch((error: unknown) => {
-        if (error instanceof Error && error.message.includes('auth/no-auth-event')) {
-          return undefined;
-        }
-        throw error;
-      });
-  }
-
-  return redirectResultReady;
+function normalizeUsername(value: string): string {
+  return value.trim().toLowerCase();
 }
 
-function prefersRedirectFlow(): boolean {
-  if (typeof window === 'undefined') {
-    return false;
+function validateUsername(value: string): string {
+  const normalized = normalizeUsername(value);
+
+  if (!USERNAME_PATTERN.test(normalized)) {
+    throw new Error('Username must be 3-24 characters using letters, numbers, underscore or hyphen.');
   }
 
-  const standaloneMedia =
-    typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches;
-  const standaloneNavigator = Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
-  const mobileUserAgent = /android|iphone|ipad|ipod/i.test(window.navigator.userAgent);
-
-  return standaloneMedia || standaloneNavigator || mobileUserAgent;
+  return normalized;
 }
 
-function shouldFallbackToRedirect(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
+export function buildAuthEmail(username: string): string {
+  return `${validateUsername(username)}@${AUTH_EMAIL_DOMAIN}`;
+}
+
+export function extractUsernameFromAuthEmail(email: string | null | undefined): string {
+  const normalizedEmail = email?.trim().toLowerCase() ?? '';
+  const suffix = `@${AUTH_EMAIL_DOMAIN}`;
+
+  if (!normalizedEmail.endsWith(suffix)) {
+    throw new Error('This account is not a valid BudgetPulse username/password account.');
   }
 
-  return (
-    error.message.includes('auth/popup-blocked') ||
-    error.message.includes('auth/popup-closed-by-user') ||
-    error.message.includes('auth/cancelled-popup-request') ||
-    error.message.includes('auth/operation-not-supported-in-this-environment')
-  );
+  const username = normalizedEmail.slice(0, -suffix.length);
+  return validateUsername(username);
 }
 
 export async function initializeAuthState(): Promise<void> {
-  if (!persistenceReady) {
-    persistenceReady = ensureRedirectResultProcessed();
-  }
-
-  await persistenceReady;
+  return Promise.resolve();
 }
 
 export function observeAuthState(onChange: (user: User | null) => void): Unsubscribe {
   return onAuthStateChanged(getFirebaseAuth(), onChange);
 }
 
-export async function signInWithGoogle(): Promise<void> {
-  await initializeAuthState();
+export async function signInWithPassword(username: string, password: string): Promise<void> {
+  await signInWithEmailAndPassword(getFirebaseAuth(), buildAuthEmail(username), password);
+}
 
-  if (prefersRedirectFlow()) {
-    await signInWithRedirect(getFirebaseAuth(), googleProvider);
-    return;
+export async function registerWithPassword(username: string, password: string): Promise<void> {
+  if (password.trim().length < 6) {
+    throw new Error('Password must be at least 6 characters.');
   }
 
-  try {
-    await signInWithPopup(getFirebaseAuth(), googleProvider);
-  } catch (error) {
-    if (!shouldFallbackToRedirect(error)) {
-      throw error;
-    }
-
-    await signInWithRedirect(getFirebaseAuth(), googleProvider);
-  }
+  await createUserWithEmailAndPassword(getFirebaseAuth(), buildAuthEmail(username), password);
 }
 
 export async function signOutFromApp(): Promise<void> {

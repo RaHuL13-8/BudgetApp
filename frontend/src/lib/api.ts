@@ -15,12 +15,12 @@ import {
   startAt,
   endAt,
   Timestamp,
-  Transaction,
   updateDoc,
   where,
   writeBatch
 } from 'firebase/firestore';
 import type { User as AuthUser } from 'firebase/auth';
+import { extractUsernameFromAuthEmail } from './auth';
 import { getDb } from './firebase';
 import type {
   Analytics,
@@ -48,8 +48,6 @@ const PREDEFINED_CATEGORIES: Array<{ id: string; name: string; color: string }> 
   { id: 'gifts', name: 'Gifts', color: '#EC4899' },
   { id: 'other', name: 'Other', color: '#64748B' }
 ];
-
-const LEGACY_GOOGLE_LINKS = parseLegacyGoogleLinks(import.meta.env.VITE_LEGACY_GOOGLE_LINKS);
 
 function normalizeUsername(value: string): string {
   return value.trim().toLowerCase();
@@ -139,101 +137,32 @@ function mapUserProfile(userId: string, data: Record<string, unknown>): UserProf
   };
 }
 
-function parseLegacyGoogleLinks(value: string | undefined): Map<string, string> {
-  const links = new Map<string, string>();
-
-  if (!value) {
-    return links;
-  }
-
-  for (const pair of value.split(',')) {
-    const trimmedPair = pair.trim();
-    if (!trimmedPair) {
-      continue;
-    }
-
-    const separator = trimmedPair.includes('=') ? '=' : ':';
-    const [usernameRaw, emailRaw] = trimmedPair.split(separator);
-    const username = normalizeUsername(usernameRaw ?? '');
-    const emailLower = (emailRaw ?? '').trim().toLowerCase();
-
-    if (!username || !emailLower) {
-      continue;
-    }
-
-    links.set(emailLower, username);
-  }
-
-  return links;
-}
-
 function normalizeEmail(value: string | null | undefined): string {
   return value?.trim().toLowerCase() ?? '';
-}
-
-function sanitizeUsernameBase(value: string): string {
-  const collapsed = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  const base = collapsed || 'user';
-  const sliced = base.slice(0, 24);
-
-  if (sliced.length >= 3) {
-    return sliced;
-  }
-
-  return `${sliced}${'user'.slice(sliced.length, 3)}`;
-}
-
-function buildUsernameCandidates(authUser: AuthUser): string[] {
-  const emailLower = normalizeEmail(authUser.email);
-  const emailBase = sanitizeUsernameBase(emailLower.split('@')[0] ?? '');
-  const displayBase = sanitizeUsernameBase(authUser.displayName ?? '');
-  const candidates = new Set<string>([displayBase, emailBase, `user-${emailBase}`]);
-
-  return Array.from(candidates).filter(Boolean);
-}
-
-async function claimAvailableUsername(transaction: Transaction, authUser: AuthUser): Promise<string> {
-  const candidates = buildUsernameCandidates(authUser);
-
-  for (const candidate of candidates) {
-    for (let suffix = 0; suffix < 100; suffix += 1) {
-      const proposed = suffix === 0 ? candidate : `${candidate.slice(0, Math.max(0, 24 - String(suffix).length - 1))}-${suffix}`;
-      const userId = normalizeUsername(proposed);
-      const usernameRef = doc(usernamesCollection(), userId);
-      const usernameSnapshot = await transaction.get(usernameRef);
-
-      if (!usernameSnapshot.exists()) {
-        return userId;
-      }
-    }
-  }
-
-  throw new Error('Could not generate a unique username for this Google account.');
 }
 
 function buildAuthMetadata(authUser: AuthUser) {
   return {
     authUid: authUser.uid,
     authEmail: normalizeEmail(authUser.email),
-    authProvider: 'google',
-    displayName: authUser.displayName?.trim() ?? '',
-    photoUrl: authUser.photoURL ?? '',
+    authProvider: 'password',
+    displayName: '',
+    photoUrl: '',
     updatedAt: serverTimestamp(),
     lastLoginAt: serverTimestamp()
   };
 }
 
-async function createOrLinkUserForGoogleAccount(authUser: AuthUser): Promise<string> {
+function isPasswordLinkedUser(data: Record<string, unknown>): boolean {
+  return typeof data.authUid === 'string' && Boolean(data.authUid) && data.authProvider === 'password';
+}
+
+async function createOrLinkUserForPasswordAccount(authUser: AuthUser): Promise<string> {
   const emailLower = normalizeEmail(authUser.email);
+  const requestedUserId = normalizeUsername(extractUsernameFromAuthEmail(authUser.email));
 
   if (!emailLower) {
-    throw new Error('Your Google account must have an email address before it can be linked.');
+    throw new Error('Your account is missing the expected BudgetPulse login email.');
   }
 
   const authLinkRef = doc(authLinksCollection(), authUser.uid);
@@ -245,7 +174,7 @@ async function createOrLinkUserForGoogleAccount(authUser: AuthUser): Promise<str
     if (authLinkSnapshot.exists()) {
       const linkedUserId = typeof authLinkSnapshot.data().userId === 'string' ? authLinkSnapshot.data().userId : '';
       if (!linkedUserId) {
-        throw new Error('This Google account is linked to an invalid BudgetPulse profile.');
+        throw new Error('This login is linked to an invalid BudgetPulse profile.');
       }
 
       transaction.set(
@@ -261,52 +190,53 @@ async function createOrLinkUserForGoogleAccount(authUser: AuthUser): Promise<str
       return linkedUserId;
     }
 
-    const legacyUserId = LEGACY_GOOGLE_LINKS.get(emailLower);
-    if (legacyUserId) {
-      const legacyUserRef = doc(usersCollection(), legacyUserId);
-      const legacyUserSnapshot = await transaction.get(legacyUserRef);
+    const userId = requestedUserId;
+    const usernameRef = doc(usernamesCollection(), userId);
+    const userRef = doc(usersCollection(), userId);
+    const userSnapshot = await transaction.get(userRef);
 
-      if (!legacyUserSnapshot.exists()) {
-        throw new Error(`Legacy profile @${legacyUserId} was not found in Firestore.`);
+    if (userSnapshot.exists()) {
+      const currentAuthUid = typeof userSnapshot.data().authUid === 'string' ? userSnapshot.data().authUid : '';
+      const passwordLinked = isPasswordLinkedUser(userSnapshot.data());
+      if (passwordLinked && currentAuthUid && currentAuthUid !== authUser.uid) {
+        throw new Error(`@${userId} is already linked to another account.`);
       }
 
-      const currentAuthUid = typeof legacyUserSnapshot.data().authUid === 'string' ? legacyUserSnapshot.data().authUid : '';
-      if (currentAuthUid && currentAuthUid !== authUser.uid) {
-        throw new Error(`@${legacyUserId} is already linked to another Google account.`);
-      }
+      const username = typeof userSnapshot.data().username === 'string' ? userSnapshot.data().username : userId;
 
       transaction.set(
-        authLinkRef,
+        usernameRef,
         {
-          userId: legacyUserId,
-          emailLower,
-          linkedAt: serverTimestamp(),
-          ...authMetadata
+          username,
+          usernameLower: userId,
+          userId,
+          createdAt: userSnapshot.data().createdAt ?? serverTimestamp(),
+          updatedAt: serverTimestamp()
         },
         { merge: true }
       );
-      transaction.set(legacyUserRef, authMetadata, { merge: true });
-      return legacyUserId;
+      transaction.set(userRef, authMetadata, { merge: true });
+    } else {
+      transaction.set(
+        usernameRef,
+        {
+          username: userId,
+          usernameLower: userId,
+          userId,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
+      transaction.set(userRef, {
+        username: userId,
+        usernameLower: userId,
+        friends: [],
+        createdAt: serverTimestamp(),
+        ...authMetadata
+      });
     }
 
-    const userId = await claimAvailableUsername(transaction, authUser);
-    const usernameRef = doc(usernamesCollection(), userId);
-    const userRef = doc(usersCollection(), userId);
-
-    transaction.set(usernameRef, {
-      username: userId,
-      usernameLower: userId,
-      userId,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    });
-    transaction.set(userRef, {
-      username: userId,
-      usernameLower: userId,
-      friends: [],
-      createdAt: serverTimestamp(),
-      ...authMetadata
-    });
     transaction.set(authLinkRef, {
       userId,
       emailLower,
@@ -439,9 +369,32 @@ export async function ensureUserProfile(usernameInput: string): Promise<UserProf
 }
 
 export async function ensureAuthenticatedUserProfile(authUser: AuthUser): Promise<UserProfile> {
-  const userId = await createOrLinkUserForGoogleAccount(authUser);
+  const userId = await createOrLinkUserForPasswordAccount(authUser);
   await ensureDefaultCategories(userId);
   return fetchUserProfile(userId);
+}
+
+export async function getUsernameRegistrationStatus(
+  usernameInput: string
+): Promise<'available' | 'legacy' | 'registered' | 'invalid'> {
+  const trimmed = usernameInput.trim();
+
+  if (!trimmed) {
+    return 'invalid';
+  }
+
+  try {
+    validateUsername(trimmed);
+  } catch {
+    return 'invalid';
+  }
+
+  const userSnapshot = await getDoc(doc(usersCollection(), normalizeUsername(trimmed)));
+  if (!userSnapshot.exists()) {
+    return 'available';
+  }
+
+  return isPasswordLinkedUser(userSnapshot.data()) ? 'registered' : 'legacy';
 }
 
 export async function searchUsers(searchTerm: string, currentUserId: string): Promise<UserSearchResult[]> {

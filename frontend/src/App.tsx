@@ -23,10 +23,18 @@ import {
   fetchCategories,
   fetchExpenses,
   fetchFriendInsights,
+  getUsernameRegistrationStatus,
   removeFriend,
   searchUsers
 } from './lib/api';
-import { initializeAuthState, observeAuthState, signInWithGoogle, signOutFromApp, type AuthUser } from './lib/auth';
+import {
+  initializeAuthState,
+  observeAuthState,
+  registerWithPassword,
+  signInWithPassword,
+  signOutFromApp,
+  type AuthUser
+} from './lib/auth';
 import type { Category, Expense, FriendInsight, Subcategory, UserSearchResult } from './lib/types';
 
 const currency = new Intl.NumberFormat('en-IN', {
@@ -36,6 +44,7 @@ const currency = new Intl.NumberFormat('en-IN', {
 });
 
 const FRIEND_SERIES_COLORS = ['#22C55E', '#38BDF8', '#F59E0B', '#A78BFA', '#FB7185', '#14B8A6', '#F97316'];
+const AUTH_USERNAME_PATTERN = /^[a-zA-Z0-9_-]{3,24}$/;
 
 type MobileTab = 'add' | 'trends' | 'recent' | 'friends';
 type FriendPreset = 'all' | 'month' | 'quarter' | 'ytd' | 'custom';
@@ -298,19 +307,6 @@ function keepValidSelections(selected: string[], validValues: string[]): string[
   return selected.filter((item) => validSet.has(item));
 }
 
-function isIosStandaloneMode(): boolean {
-  if (typeof window === 'undefined') {
-    return false;
-  }
-
-  const isStandalone =
-    (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches) ||
-    Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
-  const isIosDevice = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
-
-  return isStandalone && isIosDevice;
-}
-
 type FilterChipOption = {
   value: string;
   label: string;
@@ -537,6 +533,24 @@ function buildTrendData(
 }
 
 function readErrorMessage(error: unknown, fallback: string): string {
+  const authCode =
+    typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string' ? error.code : '';
+
+  switch (authCode) {
+    case 'auth/invalid-credential':
+    case 'auth/user-not-found':
+    case 'auth/wrong-password':
+      return 'Invalid user ID or password.';
+    case 'auth/email-already-in-use':
+      return 'This user ID is already registered. Sign in instead.';
+    case 'auth/weak-password':
+      return 'Password must be at least 6 characters.';
+    case 'auth/invalid-email':
+      return 'User ID is not valid. Use 3-24 letters, numbers, underscore, or hyphen.';
+    default:
+      break;
+  }
+
   if (error instanceof Error && error.message) {
     if (error.message === 'USERNAME_EXISTS') {
       return 'Username already exists. Choose a different username.';
@@ -552,6 +566,13 @@ export default function App() {
   const [authReady, setAuthReady] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [authMode, setAuthMode] = useState<'signin' | 'register'>('signin');
+  const [authUsernameInput, setAuthUsernameInput] = useState('');
+  const [authPasswordInput, setAuthPasswordInput] = useState('');
+  const [authPasswordConfirmInput, setAuthPasswordConfirmInput] = useState('');
+  const [authUsernameStatus, setAuthUsernameStatus] = useState<
+    'idle' | 'checking' | 'available' | 'legacy' | 'registered' | 'invalid'
+  >('idle');
   const [userId, setUserId] = useState('');
   const [userName, setUserName] = useState('');
 
@@ -749,6 +770,55 @@ export default function App() {
 
     void loadData();
   }, [authReady, authUser, loadData]);
+
+  useEffect(() => {
+    if (!authUser) {
+      return;
+    }
+
+    setAuthPasswordInput('');
+    setAuthPasswordConfirmInput('');
+  }, [authUser]);
+
+  useEffect(() => {
+    if (authMode !== 'register') {
+      setAuthUsernameStatus('idle');
+      return;
+    }
+
+    const trimmedUsername = authUsernameInput.trim();
+    if (!trimmedUsername) {
+      setAuthUsernameStatus('idle');
+      return;
+    }
+
+    if (!AUTH_USERNAME_PATTERN.test(trimmedUsername)) {
+      setAuthUsernameStatus('invalid');
+      return;
+    }
+
+    let cancelled = false;
+    setAuthUsernameStatus('checking');
+
+    const timeoutId = window.setTimeout(() => {
+      void getUsernameRegistrationStatus(trimmedUsername)
+        .then((status) => {
+          if (!cancelled) {
+            setAuthUsernameStatus(status);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setAuthUsernameStatus('idle');
+          }
+        });
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [authMode, authUsernameInput]);
 
   useEffect(() => {
     if (!authUser) {
@@ -1897,9 +1967,11 @@ export default function App() {
     }
   }
 
-  async function onSignIn() {
-    if (isIosStandaloneMode()) {
-      setError('Google sign-in is not reliable in iPhone/iPad Home Screen mode yet. Open BudgetPulse in Safari and sign in there.');
+  async function onSignIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!authUsernameInput.trim() || !authPasswordInput) {
+      setError('Enter your user ID and password.');
       return;
     }
 
@@ -1907,9 +1979,44 @@ export default function App() {
     setError('');
 
     try {
-      await signInWithGoogle();
+      await signInWithPassword(authUsernameInput, authPasswordInput);
     } catch (requestError) {
-      setError(readErrorMessage(requestError, 'Failed to sign in with Google.'));
+      setError(readErrorMessage(requestError, 'Failed to sign in.'));
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function onRegister(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!authUsernameInput.trim() || !authPasswordInput) {
+      setError('Enter a user ID and password to register.');
+      return;
+    }
+
+    if (authUsernameStatus === 'invalid') {
+      setError('User ID must be 3-24 characters using letters, numbers, underscore, or hyphen.');
+      return;
+    }
+
+    if (authUsernameStatus === 'registered') {
+      setError('This user ID is already registered. Sign in instead.');
+      return;
+    }
+
+    if (authPasswordInput !== authPasswordConfirmInput) {
+      setError('Passwords do not match.');
+      return;
+    }
+
+    setAuthBusy(true);
+    setError('');
+
+    try {
+      await registerWithPassword(authUsernameInput, authPasswordInput);
+    } catch (requestError) {
+      setError(readErrorMessage(requestError, 'Failed to register this user ID.'));
     } finally {
       setAuthBusy(false);
     }
@@ -2058,11 +2165,28 @@ export default function App() {
     });
   }, []);
 
-  const visibleUserName =
-    userName || authUser?.displayName?.trim() || authUser?.email?.split('@')[0] || 'User';
-  const heroUserLabel = userName ? `@${userName}` : authUser?.email ?? 'Sign in to continue';
+  const visibleUserName = userName || authUser?.email?.split('@')[0] || 'User';
+  const heroUserLabel = userName ? `@${userName}` : 'Signed in';
   const profileInitial = (userName || visibleUserName).trim().charAt(0).toUpperCase() || 'U';
-  const iosStandaloneAuthBlocked = isIosStandaloneMode() && !authUser;
+  const authUsernameHint =
+    authMode !== 'register'
+      ? ''
+      : authUsernameStatus === 'checking'
+        ? 'Checking this user ID...'
+        : authUsernameStatus === 'available'
+          ? 'This user ID is available.'
+          : authUsernameStatus === 'legacy'
+            ? 'Existing legacy data found. Registering will link that history.'
+            : authUsernameStatus === 'registered'
+              ? 'This user ID is already registered. Sign in instead.'
+              : authUsernameStatus === 'invalid'
+                ? 'Use 3-24 letters, numbers, underscore, or hyphen.'
+                : '';
+  const isRegisterBlocked =
+    authBusy ||
+    authUsernameStatus === 'checking' ||
+    authUsernameStatus === 'invalid' ||
+    authUsernameStatus === 'registered';
 
   if (!authReady) {
     return (
@@ -2085,15 +2209,97 @@ export default function App() {
         <div className="bg-orb bg-orb-bottom" />
         <section className="auth-card glass">
           <p className="eyebrow app-title">BudgetPulse</p>
-          <h1>Sign in to continue</h1>
+          <h1>{authMode === 'signin' ? 'Sign in to continue' : 'Create your account'}</h1>
           <p className="muted">
-            {iosStandaloneAuthBlocked
-              ? 'Use Safari on iPhone/iPad to sign in. Home Screen mode does not restore Google sign-in reliably yet.'
-              : 'Use the Google account linked to your profile so your expenses, categories, and universe load correctly.'}
+            {authMode === 'signin'
+              ? 'Use your BudgetPulse user ID and password. If this is an older account like rahul or sneha, register once with the same user ID to link the existing data.'
+              : 'Register with the user ID you want to keep. If that user ID already exists from the old app, we will link that history to this password login.'}
           </p>
-          <button type="button" className="primary auth-action-btn" onClick={onSignIn} disabled={authBusy}>
-            {authBusy ? 'Opening Google...' : iosStandaloneAuthBlocked ? 'Use Safari to Sign In' : 'Continue with Google'}
-          </button>
+          <div className="auth-mode-switch">
+            <button
+              type="button"
+              className={authMode === 'signin' ? 'range-btn active' : 'range-btn'}
+              onClick={() => {
+                setAuthMode('signin');
+                setError('');
+              }}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              className={authMode === 'register' ? 'range-btn active' : 'range-btn'}
+              onClick={() => {
+                setAuthMode('register');
+                setError('');
+              }}
+            >
+              Register
+            </button>
+          </div>
+          <form className="auth-form" onSubmit={authMode === 'signin' ? onSignIn : onRegister}>
+            <label>
+              User ID
+              <input
+                value={authUsernameInput}
+                onChange={(event) => {
+                  setAuthUsernameInput(event.target.value);
+                  setError('');
+                }}
+                placeholder="e.g. rahul"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                autoFocus
+              />
+            </label>
+            {authUsernameHint ? (
+              <p
+                className={
+                  authUsernameStatus === 'registered' || authUsernameStatus === 'invalid'
+                    ? 'auth-helper auth-helper-error'
+                    : 'auth-helper'
+                }
+              >
+                {authUsernameHint}
+              </p>
+            ) : null}
+            <label>
+              Password
+              <input
+                type="password"
+                value={authPasswordInput}
+                onChange={(event) => {
+                  setAuthPasswordInput(event.target.value);
+                  setError('');
+                }}
+                placeholder="At least 6 characters"
+                autoComplete={authMode === 'signin' ? 'current-password' : 'new-password'}
+              />
+            </label>
+            {authMode === 'register' ? (
+              <label>
+                Confirm Password
+                <input
+                  type="password"
+                  value={authPasswordConfirmInput}
+                  onChange={(event) => {
+                    setAuthPasswordConfirmInput(event.target.value);
+                    setError('');
+                  }}
+                  placeholder="Re-enter password"
+                  autoComplete="new-password"
+                />
+              </label>
+            ) : null}
+            <button
+              type="submit"
+              className="primary auth-action-btn"
+              disabled={authMode === 'register' ? isRegisterBlocked : authBusy}
+            >
+              {authBusy ? 'Please wait...' : authMode === 'signin' ? 'Sign In' : 'Register'}
+            </button>
+          </form>
         </section>
         {error ? <p className="error-banner">{error}</p> : null}
       </main>
@@ -2132,13 +2338,13 @@ export default function App() {
                   {profileInitial}
                 </div>
                 <div>
-                  <h4>{authUser.displayName?.trim() || visibleUserName}</h4>
-                  <p>{authUser.email ?? 'No Google email found'}</p>
+                  <h4>@{visibleUserName}</h4>
+                  <p>Signed in with user ID + password</p>
                   <p>Budget profile: @{userName}</p>
                 </div>
               </div>
               <p>
-                Use this profile to check which budget you&apos;re in, add people to your universe by username, or
+                Use this profile to confirm which budget you&apos;re in, add people to your universe by username, or
                 sign out when needed.
               </p>
             </section>

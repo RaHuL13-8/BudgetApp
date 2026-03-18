@@ -152,6 +152,34 @@ h5 {
   min-height: 48px;
 }
 
+.auth-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.auth-form {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.auth-form label {
+  display: grid;
+  gap: 0.34rem;
+  font-size: 0.86rem;
+  color: #cbd5e1;
+}
+
+.auth-helper {
+  margin: -0.18rem 0 0;
+  font-size: 0.8rem;
+  color: #86efac;
+}
+
+.auth-helper-error {
+  color: #fda4af;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
